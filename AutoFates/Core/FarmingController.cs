@@ -511,7 +511,8 @@ public sealed unsafe class FarmingController
             }
         }
 
-        var target = FateTargeting.EnsureFateTarget(_targetFateId);
+        var isDefend = FateSelector.Classify(fate) == FateType.Defend;
+        var target = FateTargeting.EnsureFateTarget(_targetFateId, defendPriority: isDefend);
 
         if (target != null && EzThrottler.Throttle("AF_TargetLog", 3000))
             Svc.Log.Debug($"[Combat] Targeting fate mob '{target.Name}' ({FateTargeting.CountFateEnemies(_targetFateId)} fate mobs nearby).");

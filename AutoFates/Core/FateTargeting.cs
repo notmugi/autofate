@@ -65,6 +65,53 @@ public static unsafe class FateTargeting
         return list.Count > 0 ? list[0] : null;
     }
 
+    /// <summary>
+    /// Friendly NPCs that belong to the fate and have a health bar — i.e. the protect targets in a
+    /// Defend fate (and escort NPCs). These carry the FateId but are NOT the Combatant subkind.
+    /// </summary>
+    public static List<IBattleNpc> GetDefendedFriendlies(ushort fateId)
+    {
+        var result = new List<IBattleNpc>();
+        if (fateId == 0) return result;
+        foreach (var obj in Svc.Objects)
+        {
+            if (obj is not IBattleNpc bnpc) continue;
+            if (bnpc.IsDead) continue;
+            if (GetFateId(bnpc) != fateId) continue;
+            // Friendly = not the hostile Combatant subkind, but has a health bar (MaxHp > 0).
+            if (bnpc.BattleNpcKind == Dalamud.Game.ClientState.Objects.Enums.BattleNpcSubKind.Combatant) continue;
+            if (bnpc.MaxHp == 0) continue;
+            result.Add(bnpc);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Defend-fate targeting: pick the enemy that is attacking one of the protected friendlies,
+    /// nearest such enemy first. Falls back to the nearest fate enemy if none are currently
+    /// targeting a friendly. Returns null if there are no fate enemies at all.
+    /// </summary>
+    public static IBattleNpc? GetDefendTarget(ushort fateId)
+    {
+        var enemies = GetFateEnemies(fateId);
+        if (enemies.Count == 0) return null;
+
+        var friendlies = GetDefendedFriendlies(fateId);
+        if (friendlies.Count == 0) return enemies[0]; // nothing to defend yet -> nearest enemy
+
+        var friendlyIds = new HashSet<ulong>();
+        foreach (var f in friendlies) friendlyIds.Add(f.GameObjectId);
+
+        // Enemies already locked onto a protected friendly (these are the real threat). enemies is
+        // already nearest-first, so the first match is the closest threat.
+        foreach (var e in enemies)
+            if (e.TargetObjectId != 0 && friendlyIds.Contains(e.TargetObjectId))
+                return e;
+
+        // No enemy targeting a friendly right now -> just clear the nearest enemy.
+        return enemies[0];
+    }
+
     public static int CountFateEnemies(ushort fateId) => GetFateEnemies(fateId).Count;
 
     /// <summary>
@@ -72,8 +119,21 @@ public static unsafe class FateTargeting
     /// null if there are no fate enemies in range. Only retargets when the current target isn't a
     /// valid fate enemy, so we don't yank the target away from the combat backend mid-cast.
     /// </summary>
-    public static IBattleNpc? EnsureFateTarget(ushort fateId)
+    public static IBattleNpc? EnsureFateTarget(ushort fateId, bool defendPriority = false)
     {
+        // For Defend fates, ALWAYS prefer the enemy threatening a protected friendly, even if our
+        // current target is a valid enemy — the threat to the NPC takes priority.
+        if (defendPriority)
+        {
+            var threat = GetDefendTarget(fateId);
+            if (threat != null)
+            {
+                if (Svc.Targets.Target is not IBattleNpc curt || curt.GameObjectId != threat.GameObjectId)
+                    Svc.Targets.Target = threat;
+                return threat;
+            }
+        }
+
         // Keep the current target if it's still a valid fate enemy.
         if (Svc.Targets.Target is IBattleNpc cur && IsFateEnemy(cur, fateId))
             return cur;
