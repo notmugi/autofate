@@ -43,7 +43,7 @@ public sealed partial class MainWindow
         DrawInstallState(C.MovementBackend);
         ImGui.TextDisabled("vnavmesh only: AutoFates handles targeting + positioning; rotation backend fights.");
         if (C.MovementBackend == CombatBackend.BossModReborn)
-            ImGui.TextDisabled("BMR AI: requires your preset to contain the MiscAI module (NormalMovement/StayCloseToTarget).");
+            ImGui.TextDisabled("BMR AI: turns on /bmrai so BossMod Reborn handles approach, positioning, targeting, and AOE dodging.");
 
         if (C.MovementBackend == CombatBackend.BossModReborn || C.RotationBackend == CombatBackend.BossModReborn)
         {
