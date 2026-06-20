@@ -156,7 +156,7 @@ public sealed unsafe class FarmingController
         if (C.Mode == FarmingMode.SharedFates && C.StopWhenAllSharedFatesMaxed
             && Features.SharedFateTracker.HasData())
         {
-            var sharedZones = Data.Zones.SharedFateZones().Select(z => z.TerritoryId).ToHashSet();
+            var sharedZones = Data.Zones.SharedFateZones(C.SelectedSharedFateExpansions()).Select(z => z.TerritoryId).ToHashSet();
             var tracked = Features.SharedFateTracker.GetAllZones()
                 .Where(z => sharedZones.Contains(z.TerritoryId))
                 .ToList();
@@ -195,7 +195,7 @@ public sealed unsafe class FarmingController
                 return Data.Zones.ForMode(C.Mode).Select(z => z.TerritoryId).Where(t => t != 0).ToArray();
             case FarmingMode.SharedFates:
             {
-                var all = Data.Zones.SharedFateZones().Select(z => z.TerritoryId);
+                var all = Data.Zones.SharedFateZones(C.SelectedSharedFateExpansions()).Select(z => z.TerritoryId);
                 // Drive logic from the in-game Shared FATE tracker: skip zones whose shared-fate
                 // rank is already maxed (only filter when we actually have the agent data).
                 if (C.SharedFateSkipMaxed && Features.SharedFateTracker.HasData())

@@ -162,8 +162,12 @@ public static class Zones
     /// Field zones that contain Shared FATEs (ShB / EW / DT overworld zones), built dynamically
     /// from the TerritoryType sheet so it stays correct across patches.
     /// </summary>
-    public static IEnumerable<(uint TerritoryId, string Name)> SharedFateZones()
+    /// <param name="expansions">
+    /// Optional set of ExVersion row ids to include (3=ShB, 4=EW, 5=DT). If null, all three.
+    /// </param>
+    public static IEnumerable<(uint TerritoryId, string Name)> SharedFateZones(IEnumerable<uint>? expansions = null)
     {
+        var filter = expansions != null ? new HashSet<uint>(expansions) : new HashSet<uint>(SharedFateExpansions);
         var sheet = Svc.Data.GetExcelSheet<TerritoryType>();
         var seen = new HashSet<string>();
         foreach (var row in sheet)
@@ -171,7 +175,7 @@ public static class Zones
             if (row.RowId == 0) continue;
             if (row.TerritoryIntendedUse.RowId != 1) continue;
             var ex = row.ExVersion.RowId;
-            if (!SharedFateExpansions.Contains(ex)) continue;
+            if (!filter.Contains(ex)) continue;
             var name = row.PlaceName.ValueNullable?.Name.ToString();
             if (string.IsNullOrEmpty(name)) continue;
             if (!seen.Add(name)) continue;

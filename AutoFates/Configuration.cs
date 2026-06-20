@@ -73,6 +73,12 @@ public sealed class Configuration
     public int CollectInitialTurnIn = 5;
 
     // ------------------------------------------------------------------ Shared FATEs
+    /// <summary>Include Shadowbringers zones in Shared FATEs mode.</summary>
+    public bool SharedFateShB = true;
+    /// <summary>Include Endwalker zones in Shared FATEs mode.</summary>
+    public bool SharedFateEW = true;
+    /// <summary>Include Dawntrail zones in Shared FATEs mode.</summary>
+    public bool SharedFateDT = true;
     /// <summary>In Shared FATEs mode, skip zones whose shared-fate rank is already maxed (read from the in-game tracker).</summary>
     public bool SharedFateSkipMaxed = true;
     /// <summary>Stop farming entirely once every shared-fate zone is maxed.</summary>
@@ -152,6 +158,14 @@ public sealed class Configuration
     // ------------------------------------------------------------------ UI / misc
     public bool VerboseLogging = false;
     public bool OpenOnLogin = false;
+
+    /// <summary>ExVersion row ids for the shared-fate expansions the user has enabled (3=ShB,4=EW,5=DT).</summary>
+    public IEnumerable<uint> SelectedSharedFateExpansions()
+    {
+        if (SharedFateShB) yield return 3;
+        if (SharedFateEW) yield return 4;
+        if (SharedFateDT) yield return 5;
+    }
 
     public void Save() => EzConfig.Save();
 }

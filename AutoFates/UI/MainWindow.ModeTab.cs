@@ -101,6 +101,22 @@ public sealed partial class MainWindow
             + "Shared FATE tracker to skip/stop zones once their rank is maxed.");
         ImGui.Spacing();
 
+        ImGui.TextUnformatted("Expansions to farm:");
+        var shb = C.SharedFateShB;
+        if (ImGui.Checkbox("Shadowbringers", ref shb)) { C.SharedFateShB = shb; Save(); }
+        ImGui.SameLine();
+        var ew = C.SharedFateEW;
+        if (ImGui.Checkbox("Endwalker", ref ew)) { C.SharedFateEW = ew; Save(); }
+        ImGui.SameLine();
+        var dt = C.SharedFateDT;
+        if (ImGui.Checkbox("Dawntrail", ref dt)) { C.SharedFateDT = dt; Save(); }
+
+        if (!C.SharedFateShB && !C.SharedFateEW && !C.SharedFateDT)
+            ECommons.ImGuiMethods.ImGuiEx.Text(new System.Numerics.Vector4(0.9f, 0.5f, 0.2f, 1f),
+                "Select at least one expansion or there will be no zones to farm.");
+
+        ImGui.Separator();
+
         var skip = C.SharedFateSkipMaxed;
         if (ImGui.Checkbox("Skip zones whose shared-fate rank is maxed", ref skip)) { C.SharedFateSkipMaxed = skip; Save(); }
 
@@ -121,19 +137,22 @@ public sealed partial class MainWindow
                 + "This happens automatically while farming in this mode.");
 
             ImGui.Spacing();
-            var zones = Data.Zones.SharedFateZones().OrderBy(z => z.Name).ToList();
-            ImGui.TextDisabled($"{zones.Count} shared-fate zones detected (names only):");
+            var zones = Data.Zones.SharedFateZones(C.SelectedSharedFateExpansions()).OrderBy(z => z.Name).ToList();
+            ImGui.TextDisabled($"{zones.Count} shared-fate zones selected (names only):");
             using var box = ImRaii.Child("##sfzones", new System.Numerics.Vector2(0, 180), true);
             foreach (var z in zones)
                 ImGui.TextUnformatted(z.Name);
             return;
         }
 
+        var selectedZones = Data.Zones.SharedFateZones(C.SelectedSharedFateExpansions())
+            .Select(z => z.TerritoryId).ToHashSet();
         var data = Features.SharedFateTracker.GetAllZones()
+            .Where(z => selectedZones.Contains(z.TerritoryId))
             .OrderBy(z => z.IsMaxed)
             .ThenBy(z => z.ZoneName)
             .ToList();
-        ImGui.TextDisabled($"{data.Count(z => z.IsMaxed)}/{data.Count} zones maxed.");
+        ImGui.TextDisabled($"{data.Count(z => z.IsMaxed)}/{data.Count} selected zones maxed.");
 
         using (var tbl = ImRaii.Table("##sftracker", 4, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY,
                    new System.Numerics.Vector2(0, 320)))
