@@ -476,17 +476,28 @@ public sealed unsafe class FarmingController
         var me = Player.Object;
         if (me == null) return;
 
+        // PROTECT FRIENDLIES: if any fate friendly (an NPC with a health bar) is currently being
+        // attacked, prioritise killing its attacker — REGARDLESS of how the fate is classified.
+        // Many fates that aren't tagged "Defend" still have guard/escort NPCs we must protect.
+        var defendThreat = FateTargeting.GetActiveDefendThreat(_targetFateId);
+
         // STICKY TARGET: if our target is anything other than a valid fate ENEMY (a friendly NPC,
         // a dead mob, nothing, or something yanked our target away), snap it back onto a real fate
-        // enemy IMMEDIATELY — unthrottled and before the BMR yield/return logic — provided a live
-        // enemy actually exists. This fixes locking onto friendly NPCs (escort/guard) when the
-        // enemy count drops, and keeps the rotation from idling on a lost target mid-fight.
-        var isDefendNow = FateSelector.Classify(fate) == FateType.Defend;
+        // enemy IMMEDIATELY — unthrottled and before the BMR yield/return logic.
         var cur = Svc.Targets.Target as IBattleNpc;
         var targetIsValidEnemy = cur != null && !cur.IsDead && cur.CurrentHp > 0
                                  && FateTargeting.IsFateEnemy(cur, _targetFateId);
-        if (!targetIsValidEnemy && FateTargeting.CountFateEnemies(_targetFateId) > 0)
-            FateTargeting.EnsureFateTarget(_targetFateId, defendPriority: isDefendNow);
+
+        if (defendThreat != null)
+        {
+            // Always swing the target onto the mob attacking a friendly (unless we're already on it).
+            if (cur == null || cur.GameObjectId != defendThreat.GameObjectId)
+                Svc.Targets.Target = defendThreat;
+        }
+        else if (!targetIsValidEnemy && FateTargeting.CountFateEnemies(_targetFateId) > 0)
+        {
+            FateTargeting.EnsureFateTarget(_targetFateId);
+        }
 
         // CRITICAL: every backend (including BMR AI) needs a TARGET to fight — none of them will
         // go hunt fate mobs on their own. We pick the nearest live mob belonging to THIS fate

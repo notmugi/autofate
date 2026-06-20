@@ -87,6 +87,27 @@ public static unsafe class FateTargeting
     }
 
     /// <summary>
+    /// If any fate friendly (NPC with a health bar) is currently under attack, return the nearest
+    /// enemy attacking a friendly — i.e. the threat we must peel. Null if no friendly is being
+    /// attacked. Works for ANY fate (not just ones classified as Defend), since many fates have
+    /// guard/escort NPCs that aren't tagged as Defend.
+    /// </summary>
+    public static IBattleNpc? GetActiveDefendThreat(ushort fateId)
+    {
+        var friendlies = GetDefendedFriendlies(fateId);
+        if (friendlies.Count == 0) return null;
+
+        var friendlyIds = new HashSet<ulong>();
+        foreach (var f in friendlies) friendlyIds.Add(f.GameObjectId);
+
+        // enemies is nearest-first; first one targeting a friendly is the closest active threat.
+        foreach (var e in GetFateEnemies(fateId))
+            if (e.TargetObjectId != 0 && friendlyIds.Contains(e.TargetObjectId))
+                return e;
+        return null;
+    }
+
+    /// <summary>
     /// Defend-fate targeting: pick the enemy that is attacking one of the protected friendlies,
     /// nearest such enemy first. Falls back to the nearest fate enemy if none are currently
     /// targeting a friendly. Returns null if there are no fate enemies at all.
