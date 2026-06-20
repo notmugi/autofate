@@ -346,13 +346,16 @@ public static unsafe class ChocoboStableRoutine
 
             case StableStep.FetchSelect:
             {
-                // HousingMyChocobo rows: 0=Train, 1=Feed, 2=Change Name, 3=Fetch, 4=View Details, 5=Quit.
-                if (!HousingChocoboReady()) return false;
-                if (FireHousingChocobo(3)) // Fetch -> pulls the chocobo out so we can resume farming
+                // If the Fetch Yes/No confirmation is already up, click Yes and finish.
+                if (TryConfirmYesno())
                 {
                     StatusText("Fetched; resuming farming");
                     Advance(StableStep.Done);
+                    return false;
                 }
+                // HousingMyChocobo rows: 0=Train, 1=Feed, 2=Change Name, 3=Fetch, 4=View Details, 5=Quit.
+                if (!HousingChocoboReady()) return false;
+                FireHousingChocobo(3); // Fetch -> pops a "Fetch your chocobo?" Yes/No (handled above next tick)
                 return false;
             }
 
