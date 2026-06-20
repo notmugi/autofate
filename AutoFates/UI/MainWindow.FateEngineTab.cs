@@ -35,6 +35,16 @@ public sealed partial class MainWindow
         }
         ImGui.SameLine(); Help("Ignore FATEs with less than this many seconds left on their timer.");
 
+        var dwell = C.ZoneDwellSeconds;
+        if (ImGui.InputInt("Zone dwell (seconds)", ref dwell))
+        {
+            C.ZoneDwellSeconds = Math.Clamp(dwell, 0, 3600);
+            Save();
+        }
+        ImGui.SameLine(); Help("In multi-zone modes, how long to wait for FATEs to respawn in a zone "
+            + "before rotating to another zone. FATEs pop every few minutes, so keep this high (e.g. 240) "
+            + "to avoid teleport-hopping. 0 = never rotate (stay in one zone forever).");
+
         var prio = C.PrioritizeLowTimer;
         if (ImGui.Checkbox("Prioritize FATEs lower on their timer (over closest)", ref prio))
         {

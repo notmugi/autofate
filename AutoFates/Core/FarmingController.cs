@@ -32,6 +32,11 @@ public sealed unsafe class FarmingController
     private int _zoneRotationIndex;
     private readonly Dictionary<uint, int> _zoneFatesDone = new();
 
+    // Zone dwell: when we last saw an active FATE in the current zone. We stay and wait for FATEs
+    // to respawn rather than zone-hopping the instant a zone is empty.
+    private long _lastFateSeenMs;
+    private uint _dwellZone;
+
     // Collect-fate hand-in math.
     private int _collectTurnedIn;
     private int _collectEstimatedNeeded;
@@ -57,6 +62,8 @@ public sealed unsafe class FarmingController
         Stats.Reset();
         _zoneRotationIndex = 0;
         _zoneFatesDone.Clear();
+        _dwellZone = 0;
+        _lastFateSeenMs = Environment.TickCount64;
         State = FarmState.SelectingZone;
         StatusText = "Starting...";
         IPCManager.StartCombat(C);
@@ -240,30 +247,18 @@ public sealed unsafe class FarmingController
             return;
         }
 
-        // For fixed-list modes, prefer the current zone if it's in the list and has fates.
-        if (zones.Contains(here) && FateSelector.GetCandidates(C).Count > 0)
+        // If we're already in one of the mode's zones, hand off to fate selection. The dwell
+        // logic there waits for FATEs to (re)spawn and only rotates zones after ZoneDwellSeconds
+        // of being dry — we must NOT teleport away just because no FATE is active this instant.
+        if (zones.Contains(here))
         {
             _targetTerritory = here;
             State = FarmState.SelectingFate;
             return;
         }
 
-        // Otherwise pick the first zone in the list (round-robin) and travel.
+        // We're not in a mode zone — travel to the next zone in the round-robin.
         _targetTerritory = zones[_zoneRotationIndex % zones.Length];
-        if (_targetTerritory == here)
-        {
-            // We're here but no fates currently; either wait or rotate.
-            if (zones.Length > 1)
-            {
-                _zoneRotationIndex++;
-                _targetTerritory = zones[_zoneRotationIndex % zones.Length];
-            }
-            else
-            {
-                State = FarmState.SelectingFate; // single zone, just wait for fates
-                return;
-            }
-        }
         State = FarmState.TravelingToZone;
     }
 
@@ -298,6 +293,9 @@ public sealed unsafe class FarmingController
         StatusText = $"Traveling to {Data.Zones.GetTerritoryName(_targetTerritory)}";
         if (Teleporter.TravelToTerritory(C, _targetTerritory))
         {
+            // Fresh dwell window for the newly-entered zone.
+            _dwellZone = 0;
+            _lastFateSeenMs = Environment.TickCount64;
             State = FarmState.SelectingFate;
         }
     }
@@ -314,22 +312,48 @@ public sealed unsafe class FarmingController
 
         if (TryEnterMaintenance()) return;
 
+        var here = Svc.ClientState.TerritoryType;
+        var now = Environment.TickCount64;
+
+        // Reset the dwell timer whenever we (re)enter a zone, so we give each zone a full dwell
+        // window to spawn a FATE before considering rotating away.
+        if (_dwellZone != here)
+        {
+            _dwellZone = here;
+            _lastFateSeenMs = now;
+        }
+
         StatusText = "Selecting fate";
         var best = FateSelector.PickBest(C);
         if (best == null)
         {
-            // No valid fate right now. In multi-zone modes, rotate after a wait.
-            if (EzThrottler.Throttle("AF_NoFate", 8000))
+            // No valid fate right now. FATEs respawn every few minutes, so DWELL in this zone and
+            // wait rather than instantly teleporting away. Only rotate after the zone has been dry
+            // for ZoneDwellSeconds (0 = never rotate, stay forever).
+            var zones = GetModeZones();
+            var dwellMs = C.ZoneDwellSeconds * 1000L;
+            var dryFor = now - _lastFateSeenMs;
+
+            if (zones.Length > 1 && C.ZoneDwellSeconds > 0 && dryFor >= dwellMs)
             {
-                var zones = GetModeZones();
-                if (zones.Length > 1)
-                {
-                    _zoneRotationIndex++;
-                    State = FarmState.SelectingZone;
-                }
+                Svc.Log.Debug($"[Zone] No FATEs for {dryFor / 1000}s in {Data.Zones.GetTerritoryName(here)}; rotating to next zone.");
+                _zoneRotationIndex++;
+                _lastFateSeenMs = now;   // reset so the next zone gets a fresh dwell window
+                _dwellZone = 0;
+                State = FarmState.SelectingZone;
+            }
+            else
+            {
+                var remain = Math.Max(0, (dwellMs - dryFor) / 1000);
+                StatusText = zones.Length > 1 && C.ZoneDwellSeconds > 0
+                    ? $"Waiting for FATEs ({remain}s before rotating zones)"
+                    : "Waiting for FATEs to spawn";
             }
             return;
         }
+
+        // We have a live FATE here — refresh the dwell timer.
+        _lastFateSeenMs = now;
 
         _targetFateId = best.Value.Fate.FateId;
         _collectTurnedIn = 0;

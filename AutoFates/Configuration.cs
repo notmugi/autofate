@@ -72,6 +72,13 @@ public sealed class Configuration
     // Collect fate tuning
     public int CollectInitialTurnIn = 5;
 
+    /// <summary>
+    /// How long (seconds) to stay in a zone waiting for FATEs to (re)spawn before rotating to
+    /// another zone. FATEs pop every few minutes, so we dwell rather than zone-hop the instant
+    /// there's no active FATE. Only applies to multi-zone modes. 0 = never rotate (stay forever).
+    /// </summary>
+    public int ZoneDwellSeconds = 240;
+
     // ------------------------------------------------------------------ Shared FATEs
     /// <summary>Include Shadowbringers zones in Shared FATEs mode.</summary>
     public bool SharedFateShB = true;
