@@ -13,9 +13,14 @@ namespace AutoFates.IPC;
 /// </summary>
 public static class BossModIPC
 {
-    public const string InternalName = "BossMod";
+    // The plugin's Dalamud internal name is "BossModReborn", but its IPC endpoints are still
+    // registered under the "BossMod." prefix (inherited from the original BossMod).
+    public const string InternalName = "BossModReborn";
+    private const string LegacyInternalName = "BossMod";
 
-    public static bool IsInstalled => DalamudReflector.TryGetDalamudPlugin(InternalName, out _, true, true);
+    public static bool IsInstalled
+        => DalamudReflector.TryGetDalamudPlugin(InternalName, out _, true, true)
+           || DalamudReflector.TryGetDalamudPlugin(LegacyInternalName, out _, true, true);
 
     // ----------------------------------------------------- Autorotation presets
     public static bool SetActivePreset(string presetName)

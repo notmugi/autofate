@@ -15,6 +15,26 @@ public static class NavmeshIPC
     public static bool IsReady()
         => Invoke<bool>("vnavmesh.Nav.IsReady");
 
+    /// <summary>
+    /// Navmesh build/load progress: returns a value &lt; 0 when there is no active build (idle/done),
+    /// or 0..1 while the mesh is being built for the current zone.
+    /// </summary>
+    public static float BuildProgress()
+        => Invoke<float>("vnavmesh.Nav.BuildProgress");
+
+    /// <summary>
+    /// True only when the navmesh for the current zone is fully built and ready to path on.
+    /// Use this to avoid issuing movement before the mesh exists.
+    /// </summary>
+    public static bool MeshReady()
+    {
+        if (!IsInstalled) return false;
+        if (!IsReady()) return false;
+        var p = BuildProgress();
+        // p < 0 => no active build task (done/idle). p in [0,1) => still building.
+        return p < 0f || p >= 1f;
+    }
+
     public static bool PathfindInProgress()
         => Invoke<bool>("vnavmesh.SimpleMove.PathfindInProgress") || Invoke<bool>("vnavmesh.Nav.PathfindInProgress");
 

@@ -46,6 +46,20 @@ public static class Navigator
             return true;
         }
 
+        // CRITICAL: never issue movement until the navmesh for this zone has finished building.
+        // Otherwise vnavmesh can't path and the engine skips ahead (e.g. teleporting onward).
+        if (!NavmeshIPC.MeshReady())
+        {
+            if (ECommons.Throttlers.EzThrottler.Throttle("AF_NavBuilding", 3000))
+            {
+                var p = NavmeshIPC.BuildProgress();
+                Svc.Log.Debug(p is >= 0 and < 1
+                    ? $"[Navigator] Waiting for navmesh build: {p * 100:0}%"
+                    : "[Navigator] Waiting for navmesh to be ready...");
+            }
+            return false;
+        }
+
         var fly = MountManager.ShouldFly(c);
 
         // Mount up for long trips if configured.
@@ -56,19 +70,11 @@ public static class Navigator
             return false;
         }
 
-        // If mounted and flight desired, make sure we're airborne.
-        if (fly && MountManager.IsMounted)
-            MountManager.EnsureAirborne(c);
-
         // Hand the destination to vnavmesh if it isn't already pathing there.
+        // We pass fly=true and let vnavmesh perform the takeoff itself — we do NOT manually jump
+        // here (that caused the endless-jumping bug by fighting vnavmesh's own takeoff).
         if (!NavmeshIPC.IsRunning() && !NavmeshIPC.PathfindInProgress())
         {
-            if (!NavmeshIPC.IsReady())
-            {
-                if (ECommons.Throttlers.EzThrottler.Throttle("AF_NavNotReady", 5000))
-                    Svc.Log.Debug("[Navigator] vnavmesh not ready (mesh still loading).");
-                return false;
-            }
             NavmeshIPC.PathfindAndMoveCloseTo(dest, stopRange, fly && MountManager.IsMounted);
         }
 

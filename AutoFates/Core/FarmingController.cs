@@ -328,7 +328,18 @@ public sealed unsafe class FarmingController
         if (arrived || IsInsideFate(fate))
         {
             Navigator.Stop();
+
+            // Dismount before fighting — mounted/flying blocks the combat backend from engaging.
+            if (Features.MountManager.IsMounted)
+            {
+                StatusText = $"Arrived at fate: {fate.Name} (dismounting)";
+                Features.MountManager.Dismount();
+                return; // re-check next tick; once dismounted we proceed to InFate
+            }
+
             Stats.OnFateAttempted();
+            // (Re)engage the combat backend now that we're on the ground inside the fate.
+            IPCManager.StartCombat(C);
             State = FarmState.InFate;
         }
     }

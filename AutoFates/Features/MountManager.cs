@@ -16,7 +16,7 @@ namespace AutoFates.Features;
 public static unsafe class MountManager
 {
     private const uint MountRouletteGeneralAction = 9; // "Mount Roulette" general action
-    private const int FlyJumpThrottleMs = 1500;
+    private const int FlyJumpThrottleMs = 400;
 
     public static bool IsMounted => Player.Mounted;
 
@@ -55,12 +55,18 @@ public static unsafe class MountManager
         }
     }
 
-    /// <summary>While mounted and flight is allowed, jump once to take off.</summary>
+    /// <summary>
+    /// Take off into flight. NOTE: vnavmesh already handles takeoff itself when you call its
+    /// pathfind with fly=true, so this should ONLY be used as a manual fallback when we are mounted
+    /// and stationary (not currently pathing). Calling it while vnavmesh is flying us causes the
+    /// "endless jumping" bug, so the Navigator no longer calls this during active pathing.
+    /// </summary>
     public static void EnsureAirborne(Configuration c)
     {
         if (!c.UseFlight) return;
         if (!IsMounted) return;
-        if (Svc.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.InFlight]) return;
+        if (IsFlying) return;
+        if (Player.IsJumping) return; // already mid-jump; don't queue another
         if (!CanFlyHere) return;
         if (!EzThrottler.Throttle("AF_Takeoff", FlyJumpThrottleMs)) return;
 
@@ -70,6 +76,27 @@ public static unsafe class MountManager
             ActionManager.Instance()->UseAction(ActionType.GeneralAction, 2 /* Jump */);
         }
         catch (Exception e) { Svc.Log.Verbose($"[Mount] EnsureAirborne failed: {e.Message}"); }
+    }
+
+    public static bool IsFlying => Svc.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.InFlight];
+
+    /// <summary>Dismount via the Mount Roulette / mount general action toggle (id 9 toggles off when mounted).</summary>
+    public static bool Dismount()
+    {
+        if (!IsMounted) return true;
+        if (ECommons.GenericHelpers.IsOccupied()) return false;
+        if (!EzThrottler.Throttle("AF_Dismount", 1500)) return false;
+        try
+        {
+            // The "Mount" general action (id 9 = Mount Roulette) toggles dismount when already mounted.
+            ActionManager.Instance()->UseAction(ActionType.GeneralAction, MountRouletteGeneralAction);
+            return false; // dismount animation; caller re-checks IsMounted next tick
+        }
+        catch (Exception e)
+        {
+            Svc.Log.Verbose($"[Mount] Dismount failed: {e.Message}");
+            return false;
+        }
     }
 
     /// <summary>Whether we should fly for this trip (flight unlocked + user enabled).</summary>
