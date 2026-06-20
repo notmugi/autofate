@@ -100,7 +100,11 @@ public static class WrathComboIPC
         {
             SetAutoRotationState(lease.Value, true);
             SetCurrentJobAutoRotationReady(lease.Value);
-            SetAutoRotationConfigState(lease.Value, AutoRotationConfigOption.InCombatOnly, true);
+            // CRITICAL: both of these default to true in Wrath, which makes it wait for a mob to
+            // aggro us before it does anything. Force them OFF so Wrath actively OPENS combat on
+            // the fate mob we target instead of standing idle until we get hit.
+            SetAutoRotationConfigState(lease.Value, AutoRotationConfigOption.InCombatOnly, false);
+            SetAutoRotationConfigState(lease.Value, AutoRotationConfigOption.OnlyAttackInCombat, false);
             SetAutoRotationConfigState(lease.Value, AutoRotationConfigOption.FATEPriority, true);
             return true;
         }
