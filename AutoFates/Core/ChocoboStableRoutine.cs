@@ -189,7 +189,8 @@ public static unsafe class ChocoboStableRoutine
                     if (!ReinteractStable()) return false;
                     return false; // wait for the menu to open next tick
                 }
-                if (TrySelectEntry(t => t.Contains("Tend", StringComparison.OrdinalIgnoreCase)))
+                if (TrySelectEntry(t => t.Contains("Tend", StringComparison.OrdinalIgnoreCase)
+                                        && t.Contains("my chocobo", StringComparison.OrdinalIgnoreCase)))
                 {
                     StatusText("Tending to chocobo");
                     Advance(StableStep.ChooseTrain);
