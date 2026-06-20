@@ -106,7 +106,7 @@ public static unsafe class ChocoboStableRoutine
 
     // Stable interaction step machine. Each call advances one step (throttled), so we never
     // re-open / spam the menu — we click through Stable -> Train -> feed -> confirm.
-    private enum StableStep { Interact, ChooseStable, ChooseTrain, Feed, Done }
+    private enum StableStep { Interact, ChooseStable, ConfirmStable, ChooseTrain, Feed, Done }
     private static StableStep _step = StableStep.Interact;
     private static DateTime _stepStartedUtc = DateTime.MinValue;
 
@@ -164,7 +164,18 @@ public static unsafe class ChocoboStableRoutine
                 if (TrySelectEntry(t => t.Contains("Stable", StringComparison.OrdinalIgnoreCase)
                                         && t.Contains("Chocobo", StringComparison.OrdinalIgnoreCase)))
                 {
-                    StatusText("Stabling chocobo");
+                    StatusText("Confirming stable");
+                    Advance(StableStep.ConfirmStable);
+                }
+                return false;
+            }
+
+            case StableStep.ConfirmStable:
+            {
+                // The game pops a "Stable your chocobo?" Yes/No confirmation — click Yes.
+                if (TryConfirmYesno())
+                {
+                    StatusText("Stabled; choosing train");
                     Advance(StableStep.ChooseTrain);
                 }
                 return false;
@@ -241,8 +252,8 @@ public static unsafe class ChocoboStableRoutine
             bool match;
             if (c != null && c.StableDataId != 0)
             {
-                // Preferred: the exact entity the user targeted + added (by DataId).
-                match = o.DataId == c.StableDataId;
+                // Preferred: the exact entity the user targeted + added (by BaseId).
+                match = o.BaseId == c.StableDataId;
             }
             else
             {
@@ -269,6 +280,19 @@ public static unsafe class ChocoboStableRoutine
             return true;
         }
         return false;
+    }
+
+    /// <summary>Click Yes on the "Stable your chocobo?" confirmation. Returns true once clicked.</summary>
+    private static bool TryConfirmYesno()
+    {
+        if (!ECommons.GenericHelpers.TryGetAddonByName<AtkBase>("SelectYesno", out var addon)
+            || !ECommons.GenericHelpers.IsAddonReady(addon))
+            return false;
+        if (!EzThrottler.Throttle("AF_StableYes", 1000)) return false;
+        var yn = new AddonMaster.SelectYesno((nint)addon);
+        Svc.Log.Debug($"[Chocobo] Confirming Yes/No: '{yn.Text}'");
+        yn.Yes();
+        return true;
     }
 
     /// <summary>Select a SelectString entry whose text matches the predicate. Returns true if clicked.</summary>

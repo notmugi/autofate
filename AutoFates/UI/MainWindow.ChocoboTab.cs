@@ -74,7 +74,7 @@ public sealed partial class MainWindow
                 }
                 else
                 {
-                    C.StableDataId = tgt.DataId;
+                    C.StableDataId = tgt.BaseId;
                     C.StableName = tgt.Name.TextValue;
                     C.StablePosition = tgt.Position;
                     C.StableTerritory = Svc.ClientState.TerritoryType;
