@@ -131,6 +131,7 @@ public sealed unsafe class FarmingController
             case FarmState.SelectingFate: TickSelectingFate(); break;
             case FarmState.TravelingToFate: TickTravelingToFate(); break;
             case FarmState.InFate: TickInFate(); break;
+            case FarmState.ClearingAggro: TickClearingAggro(); break;
             case FarmState.CollectTurnIn: TickInFate(); break; // collect handled inside InFate
             case FarmState.Maintenance: TickMaintenance(); break;
             case FarmState.ChocoboLeveling: TickChocoboLeveling(); break;
@@ -595,7 +596,45 @@ public sealed unsafe class FarmingController
         }
 
         _targetFateId = 0;
+
+        // If we accidentally pulled stray (non-fate) enemies that are still beating on us, clear
+        // them before moving on so we don't get stuck unable to leave.
+        if (FateTargeting.GetEnemiesAttackingMe().Count > 0)
+        {
+            State = FarmState.ClearingAggro;
+            return;
+        }
+
         State = FarmState.SelectingFate;
+    }
+
+    /// <summary>Kill any stray enemies attacking us, then resume fate selection.</summary>
+    private void TickClearingAggro()
+    {
+        var attacker = FateTargeting.EnsureAttackerTarget();
+        if (attacker == null)
+        {
+            // All clear -> back to farming.
+            Navigator.Stop();
+            IPCManager.StopCombat(C);
+            State = FarmState.SelectingFate;
+            return;
+        }
+
+        StatusText = $"Clearing stray aggro: {attacker.Name}";
+        IPCManager.StartCombat(C); // make the rotation backend fight the attacker
+
+        // Walk into range if the backend isn't moving us.
+        var me = Player.Object;
+        if (me != null && !BmrMovementActive() && !ECommons.GenericHelpers.IsOccupied())
+        {
+            var dist = Vector3.Distance(me.Position, attacker.Position);
+            var engageRange = Math.Max(2.5f, attacker.HitboxRadius + 2.5f);
+            if (dist > engageRange)
+                Navigator.MoveTo(C, attacker.Position, engageRange, allowMount: false);
+            else
+                Navigator.Stop();
+        }
     }
 
     // ---------------------------------------------------------------- follow leader

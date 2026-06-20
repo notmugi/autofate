@@ -115,6 +115,44 @@ public static unsafe class FateTargeting
     public static int CountFateEnemies(ushort fateId) => GetFateEnemies(fateId).Count;
 
     /// <summary>
+    /// Enemies that are currently attacking us (in combat, targeting the player), regardless of
+    /// whether they belong to a fate. Used to clean up accidental pulls before moving on so we're
+    /// not stuck being beaten on by a stray mob. Nearest-first.
+    /// </summary>
+    public static List<IBattleNpc> GetEnemiesAttackingMe()
+    {
+        var me = Player.Object;
+        var result = new List<IBattleNpc>();
+        if (me == null) return result;
+        var myId = me.GameObjectId;
+        foreach (var obj in Svc.Objects)
+        {
+            if (obj is not IBattleNpc bnpc) continue;
+            if (bnpc.IsDead) continue;
+            if (bnpc.BattleNpcKind != Dalamud.Game.ClientState.Objects.Enums.BattleNpcSubKind.Combatant) continue;
+            if (!bnpc.IsTargetable || bnpc.CurrentHp == 0) continue;
+            // In combat with us = targeting the player.
+            if (bnpc.TargetObjectId != myId) continue;
+            result.Add(bnpc);
+        }
+        var mp = me.Position;
+        result.Sort((a, b) => Vector3.DistanceSquared(a.Position, mp).CompareTo(Vector3.DistanceSquared(b.Position, mp)));
+        return result;
+    }
+
+    /// <summary>Ensure we're targeting the nearest enemy attacking us. Returns it, or null if none.</summary>
+    public static IBattleNpc? EnsureAttackerTarget()
+    {
+        if (Svc.Targets.Target is IBattleNpc cur && !cur.IsDead && cur.CurrentHp > 0
+            && cur is { } c && c.TargetObjectId == (Player.Object?.GameObjectId ?? 0))
+            return cur;
+        var list = GetEnemiesAttackingMe();
+        if (list.Count == 0) return null;
+        Svc.Targets.Target = list[0];
+        return list[0];
+    }
+
+    /// <summary>
     /// Ensure we have a live FATE enemy targeted. Returns the target (existing or newly set), or
     /// null if there are no fate enemies in range. Only retargets when the current target isn't a
     /// valid fate enemy, so we don't yank the target away from the combat backend mid-cast.

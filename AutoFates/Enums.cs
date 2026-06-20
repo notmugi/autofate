@@ -55,6 +55,7 @@ public enum FarmState
     SelectingFate,
     TravelingToFate,
     InFate,
+    ClearingAggro,     // kill stray non-fate enemies attacking us before moving on
     CollectTurnIn,
     Maintenance,       // repair / consumables / retainer
     ChocoboLeveling,
