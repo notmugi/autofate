@@ -4,6 +4,7 @@ An FFXIV Dalamud plugin that automates FATE farming, built with **puni.sh paradi
 (ECommons foundation, EzIPC inter-plugin communication, TaskManager-driven automation).
 
 PLUGIN IS WORK IN PROGRESS. DO NOT EXPECT IT TO BE USABLE YET.
+plugin was made using AI. i do not claim to be a programmer and never have. use at your own risk.
 ---
 
 ## Features
