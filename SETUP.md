@@ -1,64 +1,60 @@
-# Publishing AutoFates as a Dalamud repo
+# Publishing AutoFates as a Dalamud repo (no tags, no releases)
 
-This repo is set up so that pushing a version tag builds the plugin on GitHub Actions,
-publishes `latest.zip` + `repo.json` to a GitHub Release, and gives you a custom Dalamud
-repository URL you can add in-game.
+AutoFates is served **directly from the `main` branch**. There are no GitHub Releases and no
+tags involved. Dalamud reads `repo.json` and the plugin zip straight from the raw files in the
+repo.
 
-## One-time setup
+## How it works
 
-1. **Create a GitHub repo** (e.g. `AutoFates`) and push this project to it.
+- Dalamud reads **`repo.json`** from:
+  `https://raw.githubusercontent.com/notmugi/autofate/main/repo.json`
+- That points the download at **`latest.zip`** (committed at the repo root):
+  `https://raw.githubusercontent.com/notmugi/autofate/main/latest.zip`
 
-2. **Set your GitHub username** everywhere the placeholder appears. From the project root:
+Both files live on `main`. To publish or update, you just commit a new `latest.zip` + bump the
+version in `repo.json` and push.
 
-   ```bash
-   ./set-owner.sh YOUR_GITHUB_USERNAME
-   ```
-
-   (Or manually replace `YOUR_GITHUB_USERNAME` in `repo.json`.)
-
-3. **Push with submodules** (ECommons is a submodule):
-
-   ```bash
-   git remote add origin https://github.com/notmugi/autofate.git
-   git push -u origin main
-   ```
-
-   > The CI checkout uses `submodules: recursive`, so ECommons is pulled automatically on the runner.
-
-## Cutting a release
-
-Bump the version in `AutoFates/AutoFates.csproj` (`<Version>`), commit, then tag and push:
+## One-time: push the repo
 
 ```bash
-git commit -am "Release v1.0.0.1"
-git tag v1.0.0.1
-git push origin v1.0.0.1
+git remote add origin https://github.com/notmugi/autofate.git   # already set
+git push -u origin main
 ```
 
-GitHub Actions will:
-- build the plugin against the latest Dalamud,
-- attach `latest.zip` and a generated `repo.json` to a Release,
-- mark it as the `latest` release.
+If GitHub rejects the push because the remote already has commits (e.g. an auto-created README):
 
-You can also trigger a build manually from the **Actions** tab (no release is created then).
+```bash
+git pull origin main --rebase
+git push -u origin main
+```
 
-## Adding the repo in-game
+## Add the repo in-game
 
-In FFXIV with Dalamud:
+`/xlsettings` → **Experimental** → **Custom Plugin Repositories** → paste the **raw** URL:
 
-1. `/xlsettings` → **Experimental** → **Custom Plugin Repositories**.
-2. Add this URL (replace the username):
+```
+https://raw.githubusercontent.com/notmugi/autofate/main/repo.json
+```
 
-   ```
-   https://github.com/notmugi/autofate/releases/latest/download/repo.json
-   ```
+**Save and Close** → open `/xlplugins` → click the **refresh** icon → search **AutoFates**.
 
-3. **Save and Close**, then open the Plugin Installer and search **AutoFates**.
+> Use the `raw.githubusercontent.com` URL, NOT the `github.com/.../blob/...` page URL.
 
-> The `releases/latest/download/...` URLs always point to your newest release, so updates
-> are delivered automatically — no need to change the repo URL when you publish new versions.
+## Publishing an update
 
-## Alternative: dev plugin (no repo)
+Run the helper script, then push:
 
-You can still side-load the built DLL directly:
-`Settings → Experimental → Dev Plugin Locations` → add the path to `AutoFates.dll`.
+```bash
+./update-build.sh        # rebuilds, copies latest.zip, bumps repo.json version to match
+git commit -am "Update build"
+git push
+```
+
+> `raw.githubusercontent.com` is CDN-cached for a few minutes, so a new version may take ~5
+> minutes to appear in Dalamud after pushing.
+
+## Alternative: dev plugin (local, no repo)
+
+You can always side-load the built DLL directly:
+`/xlsettings` → **Experimental** → **Dev Plugin Locations** → add the path to
+`AutoFates/bin/x64/Release/AutoFates.dll`, then **Dev Tools → Installed Dev Plugins → Load**.
