@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+using System.Linq;
 using AutoFates.Features;
 using ECommons;
 using ECommons.Automation;
@@ -313,14 +315,31 @@ public static unsafe class ChocoboStableRoutine
         return false;
     }
 
-    /// <summary>True if a SelectString is open and has an entry matching the predicate.</summary>
-    private static bool MenuHasEntry(Func<string, bool> match)
+    /// <summary>
+    /// Collect menu entries from whichever selection addon is open. The stable's top menu is a
+    /// SelectString, but the "Personal Chocobo" submenu (Train/Feed/...) is a SelectIconString.
+    /// </summary>
+    private static List<(string Text, Action Select)> GetMenuEntries()
     {
-        if (!TryGetSelectString(out var ss)) return false;
-        foreach (var e in ss.Entries)
-            if (match(e.Text)) return true;
-        return false;
+        var list = new List<(string, Action)>();
+        if (ECommons.GenericHelpers.TryGetAddonByName<AtkBase>("SelectString", out var s)
+            && ECommons.GenericHelpers.IsAddonReady(s))
+        {
+            var m = new AddonMaster.SelectString((nint)s);
+            foreach (var e in m.Entries) { var ec = e; list.Add((e.Text, () => ec.Select())); }
+        }
+        else if (ECommons.GenericHelpers.TryGetAddonByName<AtkBase>("SelectIconString", out var si)
+            && ECommons.GenericHelpers.IsAddonReady(si))
+        {
+            var m = new AddonMaster.SelectIconString((nint)si);
+            foreach (var e in m.Entries) { var ec = e; list.Add((e.Text, () => ec.Select())); }
+        }
+        return list;
     }
+
+    /// <summary>True if a selection menu is open with an entry matching the predicate.</summary>
+    private static bool MenuHasEntry(Func<string, bool> match)
+        => GetMenuEntries().Any(e => match(e.Text));
 
     /// <summary>Re-target and re-interact with the stable to reopen its menu. Returns true if interact fired.</summary>
     private static bool ReinteractStable()
@@ -354,12 +373,13 @@ public static unsafe class ChocoboStableRoutine
     /// <summary>Select a SelectString entry whose text matches the predicate. Returns true if clicked.</summary>
     private static bool TrySelectEntry(Func<string, bool> match)
     {
-        if (!TryGetSelectString(out var ss)) return false;
+        var entries = GetMenuEntries();
+        if (entries.Count == 0) return false;
         // 2s buffer after entering this step before clicking, so the menu is fully populated.
         if (_stepStartedUtc != DateTime.MinValue && DateTime.UtcNow - _stepStartedUtc < TimeSpan.FromSeconds(2))
             return false;
         if (!EzThrottler.Throttle("AF_StableSelect", 2000)) return false;
-        foreach (var e in ss.Entries)
+        foreach (var e in entries)
         {
             if (match(e.Text))
             {
@@ -368,7 +388,7 @@ public static unsafe class ChocoboStableRoutine
                 return true;
             }
         }
-        Svc.Log.Debug($"[Chocobo] No matching entry. Available: {string.Join(" | ", ss.Entries.Select(x => $"'{x.Text}'"))}");
+        Svc.Log.Debug($"[Chocobo] No matching entry. Available: {string.Join(" | ", entries.Select(x => $"'{x.Text}'"))}");
         return false;
     }
 
