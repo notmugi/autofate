@@ -476,27 +476,27 @@ public sealed unsafe class FarmingController
         var me = Player.Object;
         if (me == null) return;
 
-        // PROTECT FRIENDLIES: if any fate friendly (an NPC with a health bar) is currently being
-        // attacked, prioritise killing its attacker — REGARDLESS of how the fate is classified.
-        // Many fates that aren't tagged "Defend" still have guard/escort NPCs we must protect.
-        var defendThreat = FateTargeting.GetActiveDefendThreat(_targetFateId);
-
-        // STICKY TARGET: if our target is anything other than a valid fate ENEMY (a friendly NPC,
-        // a dead mob, nothing, or something yanked our target away), snap it back onto a real fate
-        // enemy IMMEDIATELY — unthrottled and before the BMR yield/return logic.
-        var cur = Svc.Targets.Target as IBattleNpc;
-        var targetIsValidEnemy = cur != null && !cur.IsDead && cur.CurrentHp > 0
-                                 && FateTargeting.IsFateEnemy(cur, _targetFateId);
-
-        if (defendThreat != null)
+        // STICKY TARGET (every 1s): keep us on an ENEMY, never a friendly.
+        //  - If we're already targeting a live ENEMY  -> leave it alone (don't yank mid-cast).
+        //  - Otherwise (friendly / dead / nothing)     -> switch to a fate enemy.
+        // We only do this while synced to the fate (i.e. actually fighting it). A friendly under
+        // attack is handled implicitly: switching to an enemy and killing it peels the threat.
+        if (EzThrottler.Throttle("AF_Sticky", 1000))
         {
-            // Always swing the target onto the mob attacking a friendly (unless we're already on it).
-            if (cur == null || cur.GameObjectId != defendThreat.GameObjectId)
-                Svc.Targets.Target = defendThreat;
-        }
-        else if (!targetIsValidEnemy && FateTargeting.CountFateEnemies(_targetFateId) > 0)
-        {
-            FateTargeting.EnsureFateTarget(_targetFateId);
+            var cur = Svc.Targets.Target as IBattleNpc;
+            var onLiveEnemy = cur != null && !cur.IsDead && cur.CurrentHp > 0
+                              && cur.BattleNpcKind == Dalamud.Game.ClientState.Objects.Enums.BattleNpcSubKind.Combatant;
+            if (!onLiveEnemy)
+            {
+                // Prefer an enemy attacking a friendly (peel), else the nearest fate enemy.
+                var threat = FateTargeting.GetActiveDefendThreat(_targetFateId);
+                var pick = threat ?? FateTargeting.GetNearestFateEnemy(_targetFateId);
+                if (pick != null)
+                {
+                    Svc.Targets.Target = pick;
+                    Svc.Log.Debug($"[Combat] Sticky retarget -> '{pick.Name}'.");
+                }
+            }
         }
 
         // CRITICAL: every backend (including BMR AI) needs a TARGET to fight — none of them will
