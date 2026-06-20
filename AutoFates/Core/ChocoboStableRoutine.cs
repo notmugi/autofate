@@ -290,11 +290,13 @@ public static unsafe class ChocoboStableRoutine
                 }
 
                 // 2) Otherwise open the feed item's right-click context menu against the Inventory addon.
-                if (!EzThrottler.Throttle("AF_FeedOpen", 1500)) return false;
+                if (!EzThrottler.Throttle("AF_FeedOpen", 2500)) return false;
+                LogVisibleAddons(); // diagnostic: see what addons are open (incl. the real context-menu name)
                 var addonId = GetAddonId("Inventory");
                 if (addonId == 0) addonId = GetAddonId("InventoryLarge");
                 if (addonId == 0) addonId = GetAddonId("InventoryExpansion");
                 StatusText($"Opening reward context for {feedItem}");
+                Svc.Log.Information($"[Chocobo] Opening context menu for item {feedItem} (slot {InventoryUtil.FindItemSlot(feedItem)?.Slot}, addonId {addonId}).");
                 InventoryUtil.OpenItemContextMenu(feedItem, addonId);
                 return false;
             }
