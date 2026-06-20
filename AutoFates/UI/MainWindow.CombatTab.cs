@@ -15,7 +15,7 @@ public sealed partial class MainWindow
 
     private static readonly Dictionary<CombatBackend, string> MovementNames = new()
     {
-        [CombatBackend.None] = "None (vnavmesh only)",
+        [CombatBackend.None] = "vnavmesh only (recommended)",
         [CombatBackend.BossModReborn] = "BossMod Reborn AI (movement + AOE dodge)",
     };
 
@@ -33,19 +33,30 @@ public sealed partial class MainWindow
         }
         DrawInstallState(C.RotationBackend);
 
-        // Movement backend (only BMR provides full AI movement/dodge; otherwise vnavmesh).
+        // Movement backend. "vnavmesh only" is the confirmed-working default: AutoFates does its
+        // own fate-mob targeting + walks into range, and the rotation backend does the damage.
         var mov = C.MovementBackend;
         if (ImGuiEx.EnumCombo("Movement / AOE backend", ref mov, m => m is CombatBackend.None or CombatBackend.BossModReborn, MovementNames))
         {
             C.MovementBackend = mov; Save();
         }
         DrawInstallState(C.MovementBackend);
+        ImGui.TextDisabled("vnavmesh only: AutoFates handles targeting + positioning; rotation backend fights.");
+        if (C.MovementBackend == CombatBackend.BossModReborn)
+            ImGui.TextDisabled("BMR AI: requires your preset to contain the MiscAI module (NormalMovement/StayCloseToTarget).");
 
         if (C.MovementBackend == CombatBackend.BossModReborn || C.RotationBackend == CombatBackend.BossModReborn)
         {
             var preset = C.BmrPreset;
             if (ImGui.InputText("BMR preset name", ref preset, 128)) { C.BmrPreset = preset; Save(); }
             ImGui.SameLine(); Help("The BossMod Reborn autorotation preset to activate while farming.");
+        }
+
+        // AOE dodging when not using BMR for movement.
+        if (C.MovementBackend != CombatBackend.BossModReborn)
+        {
+            var dodge = C.AutoDodgeAoe;
+            if (ImGui.Checkbox("Auto-dodge AOEs (uses BMR hints if BMR is installed)", ref dodge)) { C.AutoDodgeAoe = dodge; Save(); }
         }
 
         ImGui.Separator();

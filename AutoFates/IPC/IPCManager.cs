@@ -92,11 +92,14 @@ public static class IPCManager
 
         if (c.MovementBackend == CombatBackend.BossModReborn)
         {
+            // Drive BMR's AI movement the way AutoDuty does: activate the preset and inject
+            // transient MiscAI strategies (NormalMovement=Pathfind so it walks to the target,
+            // StayCloseToTarget for engage range). This is far more reliable than /bmrai text
+            // commands. Requires the preset to contain the MiscAI module.
             if (c.RotationBackend != CombatBackend.BossModReborn)
                 BossModIPC.SetActivePreset(c.BmrPreset);
-            BossModIPC.AiEnable(true);
-            // Let BMR handle dodging/positioning; vnavmesh handles long-distance travel separately.
-            BossModIPC.AiForbidActions(c.RotationBackend != CombatBackend.BossModReborn);
+            BossModIPC.AddTransientStrategy(c.BmrPreset, "BossMod.Autorotation.MiscAI.NormalMovement", "Destination", "Pathfind");
+            BossModIPC.AddTransientStrategy(c.BmrPreset, "BossMod.Autorotation.MiscAI.StayCloseToTarget", "range", "2.5");
         }
     }
 
@@ -110,7 +113,12 @@ public static class IPCManager
         }
 
         if (c.MovementBackend == CombatBackend.BossModReborn)
-            BossModIPC.AiEnable(false);
+        {
+            // Stop BMR-driven movement.
+            BossModIPC.AddTransientStrategy(c.BmrPreset, "BossMod.Autorotation.MiscAI.NormalMovement", "Destination", "None");
+            if (c.RotationBackend != CombatBackend.BossModReborn)
+                BossModIPC.ClearActivePreset();
+        }
     }
 
     /// <summary>Whether BMR is handling movement/AOE dodging right now.</summary>

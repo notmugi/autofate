@@ -47,6 +47,23 @@ public static class BossModIPC
         catch (Exception e) { Svc.Log.Verbose($"[BMR] Create failed: {e.Message}"); return false; }
     }
 
+    public static string? GetPreset(string name)
+    {
+        try { return Svc.PluginInterface.GetIpcSubscriber<string, string?>("BossMod.Presets.Get").InvokeFunc(name); }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Add a transient (runtime) strategy override to a preset. This is how AutoDuty drives BMR's
+    /// AI to actually move and fight, e.g. NormalMovement=Pathfind and StayCloseToTarget=range.
+    /// Signature: (presetName, "BossMod.Autorotation.MiscAI.&lt;Strategy&gt;", strategyOption, value).
+    /// </summary>
+    public static bool AddTransientStrategy(string preset, string module, string option, string value)
+    {
+        try { return Svc.PluginInterface.GetIpcSubscriber<string, string, string, string, bool>("BossMod.Presets.AddTransientStrategy").InvokeFunc(preset, module, option, value); }
+        catch (Exception e) { Svc.Log.Verbose($"[BMR] AddTransientStrategy failed: {e.Message}"); return false; }
+    }
+
     // ----------------------------------------------------- AI (movement / dodge)
     // BMR AI is controlled with the /bmrai chat command.
     public static void AiEnable(bool enable) => Chat.ExecuteCommand($"/bmrai {(enable ? "on" : "off")}");
