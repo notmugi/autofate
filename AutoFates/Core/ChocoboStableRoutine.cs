@@ -137,7 +137,7 @@ public static unsafe class ChocoboStableRoutine
 
     // Stable interaction step machine. Each call advances one step (throttled), so we never
     // re-open / spam the menu — we click through Stable -> Train -> feed -> confirm.
-    private enum StableStep { Interact, ChooseStable, ConfirmStable, TendToChocobo, ChooseTrain, ConfirmTrain, Feed, Done }
+    private enum StableStep { Interact, ChooseStable, ConfirmStable, TendToChocobo, ChooseTrain, ConfirmTrain, Feed, FetchTend, FetchSelect, Done }
     private static StableStep _step = StableStep.Interact;
     private static DateTime _stepStartedUtc = DateTime.MinValue;
 
@@ -285,7 +285,7 @@ public static unsafe class ChocoboStableRoutine
                         {
                             Svc.Log.Information($"[Chocobo] Context entry '{e.Text}' -> reward {feedItem}.");
                             e.Select();
-                            Advance(StableStep.Done);
+                            Advance(StableStep.FetchTend);
                             return false;
                         }
                     }
@@ -303,6 +303,36 @@ public static unsafe class ChocoboStableRoutine
                 StatusText($"Opening reward context for {feedItem}");
                 Svc.Log.Information($"[Chocobo] Opening context menu for item {feedItem} (slot {slot?.Slot}, container {slot?.Type}, addonId {addonId}).");
                 InventoryUtil.OpenItemContextMenu(feedItem, addonId);
+                return false;
+            }
+
+            case StableStep.FetchTend:
+            {
+                // Feeding closed the menu. Re-interact and pick "Tend to my Chocobo" again to get
+                // back to the HousingMyChocobo menu so we can Fetch (withdraw from the stable).
+                if (!TryGetSelectString(out _))
+                {
+                    if (!ReinteractStable()) return false;
+                    return false;
+                }
+                if (TrySelectEntry(t => t.Contains("Tend", StringComparison.OrdinalIgnoreCase)
+                                        && t.Contains("my chocobo", StringComparison.OrdinalIgnoreCase)))
+                {
+                    StatusText("Fetching chocobo");
+                    Advance(StableStep.FetchSelect);
+                }
+                return false;
+            }
+
+            case StableStep.FetchSelect:
+            {
+                // HousingMyChocobo rows: 0=Train, 1=Feed, 2=Change Name, 3=Fetch, 4=View Details, 5=Quit.
+                if (!HousingChocoboReady()) return false;
+                if (FireHousingChocobo(3)) // Fetch -> pulls the chocobo out so we can resume farming
+                {
+                    StatusText("Fetched; resuming farming");
+                    Advance(StableStep.Done);
+                }
                 return false;
             }
 
