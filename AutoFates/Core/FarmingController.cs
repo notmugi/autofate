@@ -375,10 +375,14 @@ public sealed unsafe class FarmingController
             return;
         }
 
-        // ARRIVAL FIRST: once we're inside the fate ring we've arrived. We must NOT call MoveTo
-        // again here, or it will re-mount us for the (still > MountDistanceThreshold) distance to
-        // the fate center while the arrival logic dismounts us — causing a mount/dismount loop.
-        if (IsInsideFate(fate))
+        var me0 = Player.Object;
+        var distToCenter = me0 == null ? float.MaxValue : Vector3.Distance(me0.Position, fate.Position);
+
+        // Drop into the CENTER of the fate, not the edge. We consider ourselves "arrived" only when
+        // we're near the center (or as close as navmesh can get us). ArrivalRange is small so the
+        // combat backend engages from the middle of the pack.
+        const float arrivalRange = 4f;
+        if (distToCenter <= arrivalRange)
         {
             Navigator.Stop();
 
@@ -399,10 +403,12 @@ public sealed unsafe class FarmingController
             return;
         }
 
-        // Not inside the ring yet: keep navigating toward the fate center.
+        // Navigate to the fate CENTER (closest valid spot navmesh can reach). Allow mount/flight
+        // only while still outside the ring; once inside, walk the rest so we don't re-mount for the
+        // short hop to center (which would cause a mount/dismount loop).
         StatusText = $"Traveling to fate: {fate.Name}";
-        var stopRange = Math.Max(2f, fate.Radius * 0.7f);
-        Navigator.MoveTo(C, fate.Position, stopRange);
+        var insideRing = distToCenter <= fate.Radius;
+        Navigator.MoveTo(C, fate.Position, arrivalRange, allowMount: !insideRing);
     }
 
     private bool IsInsideFate(IFate fate)
