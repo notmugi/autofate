@@ -200,6 +200,10 @@ public static unsafe class ChocoboStableRoutine
 
             case StableStep.ChooseTrain:
             {
+                // "Tend to my Chocobo" opens a submenu; wait for it to actually contain a Train
+                // entry before clicking (avoids racing the menu transition / clicking too early).
+                if (!MenuHasEntry(t => t.Contains("Train", StringComparison.OrdinalIgnoreCase)))
+                    return false;
                 if (TrySelectEntry(t => t.Contains("Train", StringComparison.OrdinalIgnoreCase)))
                 {
                     StatusText("Confirming train");
@@ -306,6 +310,15 @@ public static unsafe class ChocoboStableRoutine
             ss = new AddonMaster.SelectString((nint)addon);
             return true;
         }
+        return false;
+    }
+
+    /// <summary>True if a SelectString is open and has an entry matching the predicate.</summary>
+    private static bool MenuHasEntry(Func<string, bool> match)
+    {
+        if (!TryGetSelectString(out var ss)) return false;
+        foreach (var e in ss.Entries)
+            if (match(e.Text)) return true;
         return false;
     }
 
