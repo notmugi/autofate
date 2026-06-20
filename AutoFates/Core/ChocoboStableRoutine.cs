@@ -342,7 +342,10 @@ public static unsafe class ChocoboStableRoutine
     private static bool TrySelectEntry(Func<string, bool> match)
     {
         if (!TryGetSelectString(out var ss)) return false;
-        if (!EzThrottler.Throttle("AF_StableSelect", 1500)) return false;
+        // 2s buffer after entering this step before clicking, so the menu is fully populated.
+        if (_stepStartedUtc != DateTime.MinValue && DateTime.UtcNow - _stepStartedUtc < TimeSpan.FromSeconds(2))
+            return false;
+        if (!EzThrottler.Throttle("AF_StableSelect", 2000)) return false;
         foreach (var e in ss.Entries)
         {
             if (match(e.Text))
@@ -352,6 +355,7 @@ public static unsafe class ChocoboStableRoutine
                 return true;
             }
         }
+        Svc.Log.Debug($"[Chocobo] No matching entry. Available: {string.Join(" | ", ss.Entries.Select(x => $"'{x.Text}'"))}");
         return false;
     }
 
