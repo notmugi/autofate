@@ -32,9 +32,10 @@ public static unsafe class FateTargeting
         if (bnpc.IsDead) return false;
         if (GetFateId(obj) != fateId) return false;
         // ONLY strictly-attackable enemies. Fates can contain friendly NPCs (escort targets,
-        // turn-in NPCs, allied combatants) that also carry the FateId — never target those.
-        // BattleNpcSubKind.Enemy is the only attackable-hostile subkind.
-        if (bnpc.BattleNpcKind != Dalamud.Game.ClientState.Objects.Enums.BattleNpcSubKind.Enemy)
+        // turn-in NPCs, party-member allies) that also carry the FateId — never target those.
+        // BattleNpcSubKind.Combatant (5) is the hostile-enemy subkind; friendly fate NPCs are
+        // BNpcPart / NpcPartyMember / etc.
+        if (bnpc.BattleNpcKind != Dalamud.Game.ClientState.Objects.Enums.BattleNpcSubKind.Combatant)
             return false;
         // Must be targetable & alive.
         return bnpc.IsTargetable && bnpc.CurrentHp > 0;
