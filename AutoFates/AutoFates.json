@@ -4,7 +4,7 @@
   "InternalName": "AutoFates",
   "Punchline": "Automated FATE farming with puni.sh-style integrations.",
   "Description": "Automates FATE farming: leveling, single zone, shared fates, atma, demiatma, luminous crystals, memories, and a fully customizable manual mode. Integrates with vnavmesh, Lifestream, BossMod Reborn, Wrath Combo, Rotation Solver Reborn, and AutoRetainer. Handles chocobo companion + leveling, food/potion upkeep, auto repair, bicolor gemstone shopping, and configurable stop triggers.\n\nThis is an automation plugin; use at your own risk.",
-  "RepoUrl": "https://github.com/yourname/AutoFates",
+  "RepoUrl": "https://github.com/notmugi/autofate",
   "ApplicableVersion": "any",
   "Tags": [
     "fate",

@@ -19,7 +19,7 @@ repository URL you can add in-game.
 3. **Push with submodules** (ECommons is a submodule):
 
    ```bash
-   git remote add origin https://github.com/YOUR_GITHUB_USERNAME/AutoFates.git
+   git remote add origin https://github.com/notmugi/autofate.git
    git push -u origin main
    ```
 
@@ -50,7 +50,7 @@ In FFXIV with Dalamud:
 2. Add this URL (replace the username):
 
    ```
-   https://github.com/YOUR_GITHUB_USERNAME/AutoFates/releases/latest/download/repo.json
+   https://github.com/notmugi/autofate/releases/latest/download/repo.json
    ```
 
 3. **Save and Close**, then open the Plugin Installer and search **AutoFates**.
