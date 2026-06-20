@@ -112,4 +112,12 @@ public static class IPCManager
     /// <summary>Whether BMR is handling movement/AOE dodging right now.</summary>
     public static bool BmrHandlesMovement(Configuration c)
         => c.MovementBackend == CombatBackend.BossModReborn && BossModIPC.IsInstalled;
+
+    /// <summary>
+    /// In the smart-mix (BMR movement) setup: true when we should stop our own pathing and let
+    /// BMR reposition us — i.e. an AOE is about to go off or BMR's AI is actively navigating us
+    /// out of danger.
+    /// </summary>
+    public static bool YieldMovementForDodge()
+        => BossModIPC.IsInstalled && BossModIPC.ShouldYieldForDodge();
 }

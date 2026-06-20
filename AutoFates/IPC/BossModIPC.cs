@@ -68,6 +68,38 @@ public static class BossModIPC
     // BMR AI is controlled with the /bmrai chat command.
     public static void AiEnable(bool enable) => Chat.ExecuteCommand($"/bmrai {(enable ? "on" : "off")}");
 
+    // ----------------------------------------------------- danger detection (Hints)
+    /// <summary>Number of active forbidden zones (incoming AOEs we should be out of).</summary>
+    public static int ForbiddenZonesCount()
+    {
+        try { return Svc.PluginInterface.GetIpcSubscriber<int>("BossMod.Hints.ForbiddenZonesCount").InvokeFunc(); }
+        catch { return 0; }
+    }
+
+    /// <summary>Seconds until the next forbidden zone activates (float.MaxValue if none).</summary>
+    public static float ForbiddenZonesNextActivation()
+    {
+        try { return Svc.PluginInterface.GetIpcSubscriber<float>("BossMod.Hints.ForbiddenZonesNextActivation").InvokeFunc(); }
+        catch { return float.MaxValue; }
+    }
+
+    /// <summary>Whether BMR's AI currently wants to move us somewhere (e.g. out of an AOE).</summary>
+    public static bool AiIsNavigating()
+    {
+        try { return Svc.PluginInterface.GetIpcSubscriber<bool>("BossMod.AI.IsNavigating").InvokeFunc(); }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// True if we should yield movement to BMR right now because danger is imminent: there is an
+    /// active forbidden zone (AOE) about to go off, or BMR's AI is actively trying to reposition.
+    /// </summary>
+    public static bool ShouldYieldForDodge()
+    {
+        if (AiIsNavigating()) return true;
+        return ForbiddenZonesCount() > 0 && ForbiddenZonesNextActivation() < 3f;
+    }
+
     /// <summary>Follow a party member by slot (0-based). Used for follow-party-leader mode.</summary>
     public static void AiFollow(int slot) => Chat.ExecuteCommand($"/bmrai follow Slot{slot + 1}");
 

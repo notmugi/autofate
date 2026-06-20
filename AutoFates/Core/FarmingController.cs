@@ -437,6 +437,20 @@ public sealed unsafe class FarmingController
         // (matched by GameObject.FateId) and feed it to the combat backend.
         if (!EzThrottler.Throttle("AF_AcquireTarget", 300)) return;
 
+        var me = Player.Object;
+        if (me == null) return;
+
+        // SMART MIX (BMR movement backend): vnavmesh walks us to the enemy, BMR handles AOE
+        // avoidance. When BMR signals an imminent dodge, we hand movement to BMR; otherwise we
+        // path toward the target ourselves. This fixes BMR's AI not approaching fate mobs on its
+        // own while still getting BMR's dodging.
+        if (BmrMovementActive() && IPCManager.YieldMovementForDodge())
+        {
+            // Danger imminent — stop our pathing and let BMR reposition us out of the AOE.
+            Navigator.Stop();
+            return;
+        }
+
         var target = FateTargeting.EnsureFateTarget(_targetFateId);
 
         if (target != null && EzThrottler.Throttle("AF_TargetLog", 3000))
@@ -444,28 +458,18 @@ public sealed unsafe class FarmingController
 
         if (target == null)
         {
-            // No fate mobs nearby. If there are none anywhere in the ring, the fate may be a
-            // boss/collect/defend lull — move toward the fate center to find action.
-            if (!BmrMovementActive() && !ECommons.GenericHelpers.IsOccupied()
-                && Vector3.Distance(Player.Object!.Position, fate.Position) > fate.Radius * 0.4f)
+            // No fate mobs nearby. The fate may be a boss/collect/defend lull — move toward the
+            // fate center to find action (unless BMR is actively repositioning us).
+            if (!ECommons.GenericHelpers.IsOccupied()
+                && Vector3.Distance(me.Position, fate.Position) > fate.Radius * 0.4f)
             {
                 Navigator.MoveTo(C, fate.Position, Math.Max(2f, fate.Radius * 0.4f), allowMount: false);
             }
             return;
         }
 
-        if (BmrMovementActive())
-        {
-            // BMR AI handles approach + rotation + dodging once it has a target. We just keep the
-            // target fresh (done above). Nothing else to do — do NOT drive movement ourselves.
-            return;
-        }
-
-        // Non-BMR movement: walk into melee/casting range of the target so the rotation backend
-        // (Wrath / RSR) can attack, and keep pulling additional fate mobs if mass-pull is on.
-        var me = Player.Object;
-        if (me == null) return;
-
+        // Walk into melee/casting range of the target so the rotation backend (Wrath / RSR / BMR)
+        // can attack. Mass-pull tightens the range so we body-pull multiple fate mobs en route.
         var dist = Vector3.Distance(me.Position, target.Position);
         var engageRange = C.MassPull ? 2.5f : Math.Max(2.5f, target.HitboxRadius + 2.5f);
         if (dist > engageRange && !ECommons.GenericHelpers.IsOccupied())
