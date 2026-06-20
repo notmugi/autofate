@@ -106,7 +106,7 @@ public static unsafe class ChocoboStableRoutine
 
     // Stable interaction step machine. Each call advances one step (throttled), so we never
     // re-open / spam the menu — we click through Stable -> Train -> feed -> confirm.
-    private enum StableStep { Interact, ChooseStable, ConfirmStable, ChooseTrain, Feed, Done }
+    private enum StableStep { Interact, ChooseStable, ConfirmStable, TendToChocobo, ChooseTrain, ConfirmTrain, Feed, Done }
     private static StableStep _step = StableStep.Interact;
     private static DateTime _stepStartedUtc = DateTime.MinValue;
 
@@ -175,7 +175,23 @@ public static unsafe class ChocoboStableRoutine
                 // The game pops a "Stable your chocobo?" Yes/No confirmation — click Yes.
                 if (TryConfirmYesno())
                 {
-                    StatusText("Stabled; choosing train");
+                    StatusText("Stabled; reopening menu");
+                    Advance(StableStep.TendToChocobo);
+                }
+                return false;
+            }
+
+            case StableStep.TendToChocobo:
+            {
+                // Stabling closes the menu, so re-interact to reopen it, then "Tend to my Chocobo".
+                if (!TryGetSelectString(out _))
+                {
+                    if (!ReinteractStable()) return false;
+                    return false; // wait for the menu to open next tick
+                }
+                if (TrySelectEntry(t => t.Contains("Tend", StringComparison.OrdinalIgnoreCase)))
+                {
+                    StatusText("Tending to chocobo");
                     Advance(StableStep.ChooseTrain);
                 }
                 return false;
@@ -183,17 +199,21 @@ public static unsafe class ChocoboStableRoutine
 
             case StableStep.ChooseTrain:
             {
-                // Stabling closes the menu, so re-interact with the stable to reopen it.
-                if (!TryGetSelectString(out _))
-                {
-                    if (!ReinteractStable()) return false;
-                    return false; // wait for the menu to open next tick
-                }
-                // The reopened menu offers "Train" — click it (matched by text).
                 if (TrySelectEntry(t => t.Contains("Train", StringComparison.OrdinalIgnoreCase)))
                 {
-                    StatusText("Training chocobo");
-                    _lastStableUtc = DateTime.UtcNow; // stabling/training sets the ~1h cooldown
+                    StatusText("Confirming train");
+                    Advance(StableStep.ConfirmTrain);
+                }
+                return false;
+            }
+
+            case StableStep.ConfirmTrain:
+            {
+                // "Train your chocobo?" Yes/No confirmation.
+                if (TryConfirmYesno())
+                {
+                    StatusText("Trained; feeding");
+                    _lastStableUtc = DateTime.UtcNow; // training sets the ~1h cooldown
                     Advance(StableStep.Feed);
                 }
                 return false;
