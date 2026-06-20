@@ -1,0 +1,13 @@
+{
+  "Author": "notmugi",
+  "Name": "AddonDumper",
+  "InternalName": "AddonDumper",
+  "Punchline": "Dump visible game addons (UI windows) and their node text.",
+  "Description": "A tiny dev tool: opens a window with a Dump button that lists every visible addon by name, plus their text nodes. Use it to discover addon names for automation.",
+  "ApplicableVersion": "any",
+  "Tags": ["dev", "debug", "addon"],
+  "DalamudApiLevel": 15,
+  "LoadRequiredState": 0,
+  "LoadSync": false,
+  "CanUnloadAsync": false
+}
