@@ -432,44 +432,49 @@ public sealed unsafe class FarmingController
 
     private void EnsureCombatEngaged(IFate fate)
     {
-        // BMR AI / RSR / Wrath handle target selection & rotation. For RSR we can nudge priority.
-        // Mass-pull vs. careful: if mass pull is off, we rely on the backend's targeting.
-        if (BmrMovementActive())
+        // CRITICAL: every backend (including BMR AI) needs a TARGET to fight — none of them will
+        // go hunt fate mobs on their own. We pick the nearest live mob belonging to THIS fate
+        // (matched by GameObject.FateId) and feed it to the combat backend.
+        if (!EzThrottler.Throttle("AF_AcquireTarget", 300)) return;
+
+        var target = FateTargeting.EnsureFateTarget(_targetFateId);
+
+        if (target != null && EzThrottler.Throttle("AF_TargetLog", 3000))
+            Svc.Log.Debug($"[Combat] Targeting fate mob '{target.Name}' ({FateTargeting.CountFateEnemies(_targetFateId)} fate mobs nearby).");
+
+        if (target == null)
         {
-            // BMR AI navigates and fights; nothing else to do.
+            // No fate mobs nearby. If there are none anywhere in the ring, the fate may be a
+            // boss/collect/defend lull — move toward the fate center to find action.
+            if (!BmrMovementActive() && !ECommons.GenericHelpers.IsOccupied()
+                && Vector3.Distance(Player.Object!.Position, fate.Position) > fate.Radius * 0.4f)
+            {
+                Navigator.MoveTo(C, fate.Position, Math.Max(2f, fate.Radius * 0.4f), allowMount: false);
+            }
             return;
         }
 
-        // Non-BMR movement: ensure we keep within the fate and let rotation backend attack.
-        if (!Svc.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.InCombat]
-            && Svc.Targets.Target == null
-            && EzThrottler.Throttle("AF_AcquireTarget", 1000))
+        if (BmrMovementActive())
         {
-            AcquireFateTarget(fate);
+            // BMR AI handles approach + rotation + dodging once it has a target. We just keep the
+            // target fresh (done above). Nothing else to do — do NOT drive movement ourselves.
+            return;
         }
+
+        // Non-BMR movement: walk into melee/casting range of the target so the rotation backend
+        // (Wrath / RSR) can attack, and keep pulling additional fate mobs if mass-pull is on.
+        var me = Player.Object;
+        if (me == null) return;
+
+        var dist = Vector3.Distance(me.Position, target.Position);
+        var engageRange = C.MassPull ? 2.5f : Math.Max(2.5f, target.HitboxRadius + 2.5f);
+        if (dist > engageRange && !ECommons.GenericHelpers.IsOccupied())
+            Navigator.MoveTo(C, target.Position, engageRange, allowMount: false);
+        else
+            Navigator.Stop();
     }
 
     private bool BmrMovementActive() => IPCManager.BmrHandlesMovement(C);
-
-    private void AcquireFateTarget(IFate fate)
-    {
-        // Target the nearest enemy that belongs to this fate.
-        var me = Player.Object;
-        if (me == null) return;
-        Dalamud.Game.ClientState.Objects.Types.IGameObject? nearest = null;
-        var nearestDist = float.MaxValue;
-        foreach (var obj in Svc.Objects)
-        {
-            if (obj is not Dalamud.Game.ClientState.Objects.Types.IBattleNpc bnpc) continue;
-            if (bnpc.IsDead) continue;
-            // Fate mobs share the fate's EventId / are within the ring.
-            var d = Vector3.Distance(me.Position, bnpc.Position);
-            if (d > fate.Radius + 5f) continue;
-            if (d < nearestDist) { nearestDist = d; nearest = bnpc; }
-        }
-        if (nearest != null)
-            Svc.Targets.Target = nearest;
-    }
 
     // ---------------------------------------------------------------- collect fates
     private void HandleCollectFate(IFate fate)
