@@ -4,7 +4,6 @@ using ECommons.GameHelpers;
 using ECommons.Throttlers;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.UI;
-using Lumina.Excel.Sheets;
 
 namespace AutoFates.Features;
 
@@ -20,45 +19,28 @@ namespace AutoFates.Features;
 /// </summary>
 public static unsafe class ChocoboManager
 {
-    // Resolved lazily from the GeneralAction sheet by name so we never hardcode a wrong id.
-    private static uint _defenderId, _attackerId, _healerId, _gysahlId, _withdrawId;
-    private static bool _resolved;
-
-    private static void ResolveActions()
-    {
-        if (_resolved) return;
-        _resolved = true;
-        try
-        {
-            var sheet = Svc.Data.GetExcelSheet<GeneralAction>();
-            foreach (var row in sheet)
-            {
-                var name = row.Name.ToString();
-                if (string.Equals(name, "Defender Stance", StringComparison.OrdinalIgnoreCase)) _defenderId = row.RowId;
-                else if (string.Equals(name, "Attacker Stance", StringComparison.OrdinalIgnoreCase)) _attackerId = row.RowId;
-                else if (string.Equals(name, "Healer Stance", StringComparison.OrdinalIgnoreCase)) _healerId = row.RowId;
-                else if (string.Equals(name, "Gysahl Greens", StringComparison.OrdinalIgnoreCase)) _gysahlId = row.RowId;
-                else if (string.Equals(name, "Withdraw", StringComparison.OrdinalIgnoreCase)) _withdrawId = row.RowId;
-            }
-            Svc.Log.Debug($"[Chocobo] Resolved D={_defenderId} A={_attackerId} H={_healerId} Gysahl={_gysahlId} Withdraw={_withdrawId}");
-        }
-        catch (Exception e) { Svc.Log.Warning($"[Chocobo] ResolveActions failed: {e.Message}"); }
-    }
+    // Chocobo companion commands are BuddyAction rows, issued via ActionType.BuddyAction
+    // (NOT GeneralAction — that sheet has no companion commands, which is why name lookups there
+    // always returned 0 and spammed "not resolved"). These RowIds are authoritative and stable:
+    //   BuddyAction:  2=Withdraw, 3=Follow, 4=Free Stance, 5=Defender, 6=Attacker, 7=Healer.
+    // CompanionInfo.ActiveCommand holds the active stance's BuddyAction RowId directly.
+    private const uint BuddyWithdraw = 2;
+    private const uint BuddyDefender = 5;
+    private const uint BuddyAttacker = 6;
+    private const uint BuddyHealer   = 7;
 
     /// <summary>
-    /// Dismiss the chocobo companion by executing the "Withdraw" general action. This is required
-    /// before stabling (you can't stable a summoned chocobo). Returns true if Withdraw was issued.
+    /// Dismiss the chocobo companion by executing the "Withdraw" buddy action (BuddyAction #2).
+    /// Required before stabling (you can't stable a summoned chocobo). Returns true if issued.
     /// NOT /companion (that just toggles the companion menu open).
     /// </summary>
     public static bool Recall()
     {
-        ResolveActions();
         if (!IsSummoned()) return true; // already dismissed
-        if (_withdrawId == 0) { Svc.Log.Warning("[Chocobo] Withdraw action id not resolved."); return false; }
         if (!EzThrottler.Throttle("AF_Withdraw", 3_000)) return false;
         try
         {
-            ActionManager.Instance()->UseAction(ActionType.GeneralAction, _withdrawId);
+            ActionManager.Instance()->UseAction(ActionType.BuddyAction, BuddyWithdraw);
             Svc.Log.Debug("[Chocobo] Withdraw issued (dismissing companion).");
             return true;
         }
@@ -123,7 +105,6 @@ public static unsafe class ChocoboManager
     {
         if (!c.ChocoboCompanionEnabled) return;
         if (Player.Object == null || ECommons.GenericHelpers.IsOccupied()) return;
-        ResolveActions();
 
         // Re-summon / refresh on low timer.
         if (c.AutoGysahlGreens)
@@ -171,23 +152,24 @@ public static unsafe class ChocoboManager
     public static void SetStance(ChocoboStance stance)
     {
         if (stance == ChocoboStance.Follow) return;
-        ResolveActions();
 
-        var (actionId, command) = stance switch
+        // Stance = BuddyAction RowId. ActiveCommand holds the active stance's BuddyAction RowId
+        // directly, so we compare against the same id (no separate command mapping needed).
+        var actionId = stance switch
         {
-            ChocoboStance.Defender => (_defenderId, (byte)1),
-            ChocoboStance.Attacker => (_attackerId, (byte)2),
-            ChocoboStance.Healer => (_healerId, (byte)3),
-            _ => (0u, (byte)0),
+            ChocoboStance.Defender => BuddyDefender,
+            ChocoboStance.Attacker => BuddyAttacker,
+            ChocoboStance.Healer   => BuddyHealer,
+            _ => 0u,
         };
         if (actionId == 0) return;
-        if (ActiveCommand() == command) return; // already in stance
+        if (ActiveCommand() == actionId) return; // already in stance
         if (!EzThrottler.Throttle($"AF_Stance_{actionId}", 3_000)) return;
 
         try
         {
-            ActionManager.Instance()->UseAction(ActionType.GeneralAction, actionId);
-            Svc.Log.Debug($"[Chocobo] Setting stance {stance}.");
+            ActionManager.Instance()->UseAction(ActionType.BuddyAction, actionId);
+            Svc.Log.Debug($"[Chocobo] Setting stance {stance} (BuddyAction {actionId}).");
         }
         catch (Exception e) { Svc.Log.Verbose($"[Chocobo] SetStance failed: {e.Message}"); }
     }
