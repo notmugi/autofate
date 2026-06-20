@@ -183,7 +183,13 @@ public static unsafe class ChocoboStableRoutine
 
             case StableStep.ChooseTrain:
             {
-                // After stabling, a menu offers "Train" — click it (matched by text).
+                // Stabling closes the menu, so re-interact with the stable to reopen it.
+                if (!TryGetSelectString(out _))
+                {
+                    if (!ReinteractStable()) return false;
+                    return false; // wait for the menu to open next tick
+                }
+                // The reopened menu offers "Train" — click it (matched by text).
                 if (TrySelectEntry(t => t.Contains("Train", StringComparison.OrdinalIgnoreCase)))
                 {
                     StatusText("Training chocobo");
@@ -280,6 +286,22 @@ public static unsafe class ChocoboStableRoutine
             return true;
         }
         return false;
+    }
+
+    /// <summary>Re-target and re-interact with the stable to reopen its menu. Returns true if interact fired.</summary>
+    private static bool ReinteractStable()
+    {
+        var stable = FindStable();
+        if (stable == null) return false;
+        if (Player.IsAnimationLocked || !Player.Interactable) return false;
+        if (!stable.IsTarget())
+        {
+            if (EzThrottler.Throttle("AF_StableTarget", 500)) Svc.Targets.Target = stable;
+            return false;
+        }
+        if (!EzThrottler.Throttle("AF_StableReinteract", 2000)) return false;
+        TargetSystem.Instance()->InteractWithObject(stable.Struct(), false);
+        return true;
     }
 
     /// <summary>Click Yes on the "Stable your chocobo?" confirmation. Returns true once clicked.</summary>
