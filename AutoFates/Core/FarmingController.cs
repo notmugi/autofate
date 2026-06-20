@@ -484,8 +484,7 @@ public sealed unsafe class FarmingController
         if (EzThrottler.Throttle("AF_Sticky", 1000))
         {
             var cur = Svc.Targets.Target as IBattleNpc;
-            var onLiveEnemy = cur != null && !cur.IsDead && cur.CurrentHp > 0
-                              && cur.BattleNpcKind == Dalamud.Game.ClientState.Objects.Enums.BattleNpcSubKind.Combatant;
+            var onLiveEnemy = cur != null && FateTargeting.IsAttackableEnemy(cur);
             if (!onLiveEnemy)
             {
                 // Prefer an enemy attacking a friendly (peel), else the nearest fate enemy.

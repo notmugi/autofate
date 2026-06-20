@@ -29,16 +29,30 @@ public static unsafe class FateTargeting
     {
         if (fateId == 0) return false;
         if (obj is not IBattleNpc bnpc) return false;
-        if (bnpc.IsDead) return false;
         if (GetFateId(obj) != fateId) return false;
-        // ONLY strictly-attackable enemies. Fates can contain friendly NPCs (escort targets,
-        // turn-in NPCs, party-member allies) that also carry the FateId — never target those.
-        // BattleNpcSubKind.Combatant (5) is the hostile-enemy subkind; friendly fate NPCs are
-        // BNpcPart / NpcPartyMember / etc.
-        if (bnpc.BattleNpcKind != Dalamud.Game.ClientState.Objects.Enums.BattleNpcSubKind.Combatant)
-            return false;
-        // Must be targetable & alive.
-        return bnpc.IsTargetable && bnpc.CurrentHp > 0;
+        return IsAttackableEnemy(bnpc);
+    }
+
+    /// <summary>
+    /// Strict hostile check using the NAMEPLATE COLOR — the same authoritative method ECommons and
+    /// AutoDuty use. This is the only reliable way to tell an attackable enemy from a friendly NPC,
+    /// an objective object (e.g. a "Fish Basket"), or an escort/guard NPC. BattleNpcSubKind is NOT
+    /// reliable. Hostile nameplate kinds: 7 (yellow attackable), 9 (red engaged), 10/11 (engaged/
+    /// aggroed), 4/5/6 (PvP). Friendlies (green/other) are excluded.
+    /// </summary>
+    public static bool IsAttackableEnemy(IBattleNpc bnpc)
+    {
+        if (bnpc.IsDead || bnpc.CurrentHp == 0) return false;
+        if (!bnpc.IsTargetable) return false;
+        try
+        {
+            return ECommons.GameFunctions.ObjectFunctions.IsHostile(bnpc);
+        }
+        catch
+        {
+            // Fallback if the nameplate sig ever breaks: require the hostile Combatant subkind.
+            return bnpc.BattleNpcKind == Dalamud.Game.ClientState.Objects.Enums.BattleNpcSubKind.Combatant;
+        }
     }
 
     /// <summary>All live enemies belonging to the fate, ordered nearest-first.</summary>
@@ -78,8 +92,8 @@ public static unsafe class FateTargeting
             if (obj is not IBattleNpc bnpc) continue;
             if (bnpc.IsDead) continue;
             if (GetFateId(bnpc) != fateId) continue;
-            // Friendly = not the hostile Combatant subkind, but has a health bar (MaxHp > 0).
-            if (bnpc.BattleNpcKind == Dalamud.Game.ClientState.Objects.Enums.BattleNpcSubKind.Combatant) continue;
+            // Friendly = NOT hostile (by nameplate), but has a health bar (MaxHp > 0).
+            if (IsAttackableEnemy(bnpc)) continue;
             if (bnpc.MaxHp == 0) continue;
             result.Add(bnpc);
         }
@@ -149,9 +163,7 @@ public static unsafe class FateTargeting
         foreach (var obj in Svc.Objects)
         {
             if (obj is not IBattleNpc bnpc) continue;
-            if (bnpc.IsDead) continue;
-            if (bnpc.BattleNpcKind != Dalamud.Game.ClientState.Objects.Enums.BattleNpcSubKind.Combatant) continue;
-            if (!bnpc.IsTargetable || bnpc.CurrentHp == 0) continue;
+            if (!IsAttackableEnemy(bnpc)) continue;
             // In combat with us = targeting the player.
             if (bnpc.TargetObjectId != myId) continue;
             result.Add(bnpc);
