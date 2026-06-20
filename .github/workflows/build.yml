@@ -1,0 +1,97 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'           # e.g. v1.0.0.0 -> creates a release
+  workflow_dispatch:    # allow manual builds (no release)
+
+permissions:
+  contents: write       # needed to create releases
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Download Dalamud
+        run: |
+          Invoke-WebRequest -Uri https://goatcorp.github.io/dalamud-distrib/latest.zip -OutFile dalamud.zip
+          Expand-Archive -Path dalamud.zip -DestinationPath "$env:GITHUB_WORKSPACE/dalamud" -Force
+        shell: pwsh
+
+      - name: Restore
+        run: dotnet restore AutoFates/AutoFates.csproj
+
+      - name: Build (Release)
+        run: dotnet build AutoFates/AutoFates.csproj -c Release --no-restore -p:DalamudLibPath="$env:GITHUB_WORKSPACE/dalamud/"
+        shell: pwsh
+
+      - name: Read plugin version
+        id: ver
+        run: |
+          $json = Get-Content AutoFates/bin/x64/Release/AutoFates/AutoFates.json | ConvertFrom-Json
+          "version=$($json.AssemblyVersion)" >> $env:GITHUB_OUTPUT
+          "apilevel=$($json.DalamudApiLevel)" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+
+      - name: Generate repo.json
+        run: |
+          $repo = "${{ github.repository }}"          # owner/name
+          $version = "${{ steps.ver.outputs.version }}"
+          $api = "${{ steps.ver.outputs.apilevel }}"
+          $manifest = Get-Content AutoFates/bin/x64/Release/AutoFates/AutoFates.json | ConvertFrom-Json
+          $dl = "https://github.com/$repo/releases/latest/download/latest.zip"
+          $obj = [ordered]@{
+            Author              = $manifest.Author
+            Name                = $manifest.Name
+            InternalName        = $manifest.InternalName
+            AssemblyVersion     = $version
+            TestingAssemblyVersion = $version
+            Description         = $manifest.Description
+            Punchline           = $manifest.Punchline
+            ApplicableVersion   = "any"
+            RepoUrl             = "https://github.com/$repo"
+            DalamudApiLevel     = [int]$api
+            TestingDalamudApiLevel = [int]$api
+            IconUrl             = "https://raw.githubusercontent.com/$repo/main/AutoFates/images/icon.png"
+            Tags                = $manifest.Tags
+            CategoryTags        = $manifest.CategoryTags
+            IsHide              = $false
+            IsTestingExclusive  = $false
+            DownloadLinkInstall = $dl
+            DownloadLinkTesting = $dl
+            DownloadLinkUpdate  = $dl
+            DownloadCount       = 0
+          }
+          $arr = @($obj)
+          $arr | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 repo.json
+          Get-Content repo.json
+        shell: pwsh
+
+      - name: Create / update release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            AutoFates/bin/x64/Release/AutoFates/latest.zip
+            repo.json
+          tag_name: ${{ github.ref_name }}
+          name: AutoFates ${{ steps.ver.outputs.version }}
+          body: |
+            Automated build of AutoFates ${{ steps.ver.outputs.version }} (Dalamud API ${{ steps.ver.outputs.apilevel }}).
+
+            **Add to Dalamud:** paste this into *Settings → Experimental → Custom Plugin Repositories*:
+            ```
+            https://github.com/${{ github.repository }}/releases/latest/download/repo.json
+            ```
+          draft: false
+          prerelease: false
