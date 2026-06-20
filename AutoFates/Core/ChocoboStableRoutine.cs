@@ -47,12 +47,20 @@ public static unsafe class ChocoboStableRoutine
         if (!c.ChocoboLevelingEnabled) return false;
         if (ChocoboManager.ReachedTargetLevel(c)) return false; // done
 
-        // If the cooldown has elapsed and we have curiel roots (or need to advance rank), go.
+        // Stabling REQUIRES Thavnairian Onions (they raise the rank cap). No onions -> skip the
+        // whole chocobo-leveling loop entirely; don't interrupt farming.
+        if (!ChocoboManager.HasThavnairianOnions())
+        {
+            if (EzThrottler.Throttle("AF_NoOnions", 60_000))
+                Svc.Log.Information("[Chocobo] No Thavnairian Onions; skipping chocobo leveling.");
+            return false;
+        }
+
+        // Respect the ~1h stable cooldown.
         var cooldownElapsed = DateTime.UtcNow - _lastStableUtc >= StableCooldown;
         if (!cooldownElapsed) return false;
 
-        // Need either curiel roots (to feed) or the rank is maxed for current tier (needs stabling).
-        return ChocoboManager.HasCurielRoots() || ChocoboNeedsTierUnlock();
+        return ChocoboNeedsTierUnlock();
     }
 
     /// <summary>Heuristic: companion XP at/near cap for the current rank means we must stable to advance.</summary>
@@ -230,13 +238,12 @@ public static unsafe class ChocoboStableRoutine
                 // Training opens a "Reward" prompt = the Inventory addon in selection mode. You
                 // reward (feed) by right-clicking the item and choosing "Reward". We automate that:
                 // open the item's context menu against the Inventory addon, then click "Reward".
-                // Prefer Thavnairian Onion (raises the rank cap past 10), else Curiel Root.
-                var feedItem = ChocoboManager.HasThavnairianOnions() ? Data.GameItems.ThavnairianOnion
-                             : ChocoboManager.HasCurielRoots()        ? Data.GameItems.CurielRoot
-                             : 0u;
+                // Reward only Thavnairian Onions (raise the rank cap). Curiel Roots are an XP buff,
+                // NOT a stable reward, so never reward them here.
+                var feedItem = ChocoboManager.HasThavnairianOnions() ? Data.GameItems.ThavnairianOnion : 0u;
                 if (feedItem == 0)
                 {
-                    // Nothing to feed — nothing to reward; just finish.
+                    // No onions to reward; just finish.
                     Advance(StableStep.Done);
                     return false;
                 }
