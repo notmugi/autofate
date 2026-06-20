@@ -49,27 +49,31 @@ public static unsafe class ChocoboStableRoutine
 
         // Stabling REQUIRES Thavnairian Onions (they raise the rank cap). No onions -> skip the
         // whole chocobo-leveling loop entirely; don't interrupt farming.
-        if (!ChocoboManager.HasThavnairianOnions())
+        var onions = ChocoboManager.HasThavnairianOnions();
+        var onionCount = InventoryUtil.GetItemCount(Data.GameItems.ThavnairianOnion);
+        var cooldownLeft = StableCooldown - (DateTime.UtcNow - _lastStableUtc);
+        var cooldownElapsed = cooldownLeft <= TimeSpan.Zero;
+
+        if (EzThrottler.Throttle("AF_ChocoDiag", 10_000))
+            Svc.Log.Information($"[Chocobo] NeedsAttention: onions={onionCount} rank={ChocoboManager.Rank()} target={c.ChocoboTargetLevel} cooldownLeft={(cooldownElapsed ? 0 : cooldownLeft.TotalMinutes):0.0}m");
+
+        if (!onions)
         {
             if (EzThrottler.Throttle("AF_NoOnions", 60_000))
                 Svc.Log.Information("[Chocobo] No Thavnairian Onions; skipping chocobo leveling.");
             return false;
         }
 
-        // Respect the ~1h stable cooldown.
-        var cooldownElapsed = DateTime.UtcNow - _lastStableUtc >= StableCooldown;
+        // Respect the ~1h stable cooldown (can't stable again until it elapses).
         if (!cooldownElapsed) return false;
 
-        return ChocoboNeedsTierUnlock();
+        // We have onions, we're under target level, and the cooldown is up -> stable now.
+        // (Chocobo leveling is top priority; we don't gate on a fragile CurrentXP heuristic.)
+        return true;
     }
 
     /// <summary>Heuristic: companion XP at/near cap for the current rank means we must stable to advance.</summary>
-    private static bool ChocoboNeedsTierUnlock()
-    {
-        // Without exact per-rank XP tables, we treat a very high CurrentXP as "needs stabling".
-        // This is a conservative tuning point; refined in-game.
-        return ChocoboManager.CurrentXP() > 0 && ChocoboManager.Rank() < 20;
-    }
+
 
     /// <summary>
     /// Drive the stabling routine. Returns true when the routine has finished for now (resume farming).
