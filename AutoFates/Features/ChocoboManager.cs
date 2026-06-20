@@ -21,7 +21,7 @@ namespace AutoFates.Features;
 public static unsafe class ChocoboManager
 {
     // Resolved lazily from the GeneralAction sheet by name so we never hardcode a wrong id.
-    private static uint _defenderId, _attackerId, _healerId, _gysahlId;
+    private static uint _defenderId, _attackerId, _healerId, _gysahlId, _withdrawId;
     private static bool _resolved;
 
     private static void ResolveActions()
@@ -38,10 +38,31 @@ public static unsafe class ChocoboManager
                 else if (string.Equals(name, "Attacker Stance", StringComparison.OrdinalIgnoreCase)) _attackerId = row.RowId;
                 else if (string.Equals(name, "Healer Stance", StringComparison.OrdinalIgnoreCase)) _healerId = row.RowId;
                 else if (string.Equals(name, "Gysahl Greens", StringComparison.OrdinalIgnoreCase)) _gysahlId = row.RowId;
+                else if (string.Equals(name, "Withdraw", StringComparison.OrdinalIgnoreCase)) _withdrawId = row.RowId;
             }
-            Svc.Log.Debug($"[Chocobo] Resolved stances D={_defenderId} A={_attackerId} H={_healerId} Gysahl={_gysahlId}");
+            Svc.Log.Debug($"[Chocobo] Resolved D={_defenderId} A={_attackerId} H={_healerId} Gysahl={_gysahlId} Withdraw={_withdrawId}");
         }
         catch (Exception e) { Svc.Log.Warning($"[Chocobo] ResolveActions failed: {e.Message}"); }
+    }
+
+    /// <summary>
+    /// Dismiss the chocobo companion by executing the "Withdraw" general action. This is required
+    /// before stabling (you can't stable a summoned chocobo). Returns true if Withdraw was issued.
+    /// NOT /companion (that just toggles the companion menu open).
+    /// </summary>
+    public static bool Recall()
+    {
+        ResolveActions();
+        if (!IsSummoned()) return true; // already dismissed
+        if (_withdrawId == 0) { Svc.Log.Warning("[Chocobo] Withdraw action id not resolved."); return false; }
+        if (!EzThrottler.Throttle("AF_Withdraw", 3_000)) return false;
+        try
+        {
+            ActionManager.Instance()->UseAction(ActionType.GeneralAction, _withdrawId);
+            Svc.Log.Debug("[Chocobo] Withdraw issued (dismissing companion).");
+            return true;
+        }
+        catch (Exception e) { Svc.Log.Verbose($"[Chocobo] Withdraw failed: {e.Message}"); return false; }
     }
 
     // ----------------------------------------------------- companion state

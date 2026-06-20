@@ -633,6 +633,7 @@ public sealed unsafe class FarmingController
         // Chocobo leveling has priority when the chocobo needs stabling/feeding.
         if (C.ChocoboLevelingEnabled && ChocoboStableRoutine.NeedsAttention(C))
         {
+            ChocoboStableRoutine.ResetSteps(); // fresh stable step machine each time we enter
             State = FarmState.ChocoboLeveling;
             return true;
         }

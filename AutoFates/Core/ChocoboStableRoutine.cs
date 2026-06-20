@@ -1,9 +1,15 @@
 using AutoFates.Features;
+using ECommons;
 using ECommons.Automation;
 using ECommons.Automation.NeoTaskManager;
 using ECommons.DalamudServices;
 using ECommons.GameHelpers;
 using ECommons.Throttlers;
+using ECommons.UIHelpers.AddonMasterImplementations;
+using ECommons.GameFunctions;
+using Dalamud.Game.ClientState.Objects.Types;
+using FFXIVClientStructs.FFXIV.Client.Game.Control;
+using AtkBase = FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase;
 
 namespace AutoFates.Core;
 
@@ -85,41 +91,199 @@ public static unsafe class ChocoboStableRoutine
                 InventoryUtil.UseItem(Data.GameItems.MagickedStableBroom);
         }
 
-        // Step 4: recall companion (must recall before stabling), then stable + train + feed.
+        // Step 4: WITHDRAW the companion. You cannot stable a summoned chocobo. This issues the
+        // "Withdraw" general action (NOT /companion, which just toggles the companion menu open).
         if (ChocoboManager.IsSummoned())
         {
-            if (EzThrottler.Throttle("AF_Recall", 3000))
-                Chat.ExecuteCommand("/companion"); // dismiss/recall companion
+            StatusText("Recalling chocobo (Withdraw)");
+            ChocoboManager.Recall();
             return false;
         }
 
-        // Step 5: feed onions (rank > 10) / curiel roots while interacting with the stable.
-        var fed = false;
-        if (ChocoboManager.Rank() >= 10 && ChocoboManager.HasThavnairianOnions())
+        // Steps 5+: drive the stable addon menus step by step.
+        return DriveStableMenus(c);
+    }
+
+    // Stable interaction step machine. Each call advances one step (throttled), so we never
+    // re-open / spam the menu — we click through Stable -> Train -> feed -> confirm.
+    private enum StableStep { Interact, ChooseStable, ChooseTrain, Feed, Done }
+    private static StableStep _step = StableStep.Interact;
+    private static DateTime _stepStartedUtc = DateTime.MinValue;
+
+    /// <summary>Reset the stable step machine (call when (re)entering the chocobo-leveling state).</summary>
+    public static void ResetSteps()
+    {
+        _step = StableStep.Interact;
+        _stepStartedUtc = DateTime.MinValue;
+    }
+
+    private static bool DriveStableMenus(Configuration c)
+    {
+        // Safety timeout: if a step wedges for 20s, reset to Interact.
+        if (_stepStartedUtc != DateTime.MinValue && DateTime.UtcNow - _stepStartedUtc > TimeSpan.FromSeconds(20))
         {
-            if (EzThrottler.Throttle("AF_FeedOnion", 3000))
-                fed = InventoryUtil.UseItem(Data.GameItems.ThavnairianOnion);
-        }
-        else if (ChocoboManager.HasCurielRoots())
-        {
-            if (EzThrottler.Throttle("AF_FeedCuriel", 3000))
-                fed = InventoryUtil.UseItem(Data.GameItems.CurielRoot);
+            Svc.Log.Warning($"[Chocobo] Stable step {_step} timed out; restarting interaction.");
+            _step = StableStep.Interact;
+            _stepStartedUtc = DateTime.MinValue;
         }
 
-        if (fed)
+        switch (_step)
         {
-            _lastStableUtc = DateTime.UtcNow;
-        }
+            case StableStep.Interact:
+            {
+                // If a SelectString is already open, skip straight to choosing.
+                if (TryGetSelectString(out _)) { Advance(StableStep.ChooseStable); return false; }
 
-        // If we have nothing left to feed and the rank isn't maxed, return until cooldown / xp.
-        if (!ChocoboManager.HasCurielRoots() && !ChocoboManager.HasThavnairianOnions())
+                var stable = FindStable();
+                if (stable == null)
+                {
+                    if (EzThrottler.Throttle("AF_FindStable", 5000))
+                        Svc.Chat.PrintError("[AutoFates] Couldn't find a chocobo stable nearby. Set the stable position in the Chocobo tab.");
+                    return false;
+                }
+                if (Player.IsAnimationLocked || !Player.Interactable) return false;
+                // Must target the object before interacting (mirrors ECommons' interact pattern).
+                if (!stable.IsTarget())
+                {
+                    if (EzThrottler.Throttle("AF_StableTarget", 500))
+                        Svc.Targets.Target = stable;
+                    return false;
+                }
+                if (EzThrottler.Throttle("AF_StableInteract", 2000))
+                {
+                    StatusText("Interacting with stable");
+                    TargetSystem.Instance()->InteractWithObject(stable.Struct(), false);
+                    Advance(StableStep.ChooseStable);
+                }
+                return false;
+            }
+
+            case StableStep.ChooseStable:
+            {
+                // Click the "Stable my Chocobo" entry (matched by text).
+                if (TrySelectEntry(t => t.Contains("Stable", StringComparison.OrdinalIgnoreCase)
+                                        && t.Contains("Chocobo", StringComparison.OrdinalIgnoreCase)))
+                {
+                    StatusText("Stabling chocobo");
+                    Advance(StableStep.ChooseTrain);
+                }
+                return false;
+            }
+
+            case StableStep.ChooseTrain:
+            {
+                // After stabling, a menu offers "Train" — click it (matched by text).
+                if (TrySelectEntry(t => t.Contains("Train", StringComparison.OrdinalIgnoreCase)))
+                {
+                    StatusText("Training chocobo");
+                    _lastStableUtc = DateTime.UtcNow; // stabling/training sets the ~1h cooldown
+                    Advance(StableStep.Feed);
+                }
+                return false;
+            }
+
+            case StableStep.Feed:
+            {
+                // Feed Thavnairian Onion (raises the level cap past 10) when available, otherwise
+                // a Curiel Root. The feed is performed from the training menu / inventory.
+                if (ChocoboManager.HasThavnairianOnions())
+                {
+                    if (EzThrottler.Throttle("AF_FeedOnion", 2000))
+                    {
+                        StatusText("Feeding Thavnairian Onion");
+                        InventoryUtil.UseItem(Data.GameItems.ThavnairianOnion);
+                    }
+                }
+                else if (ChocoboManager.HasCurielRoots())
+                {
+                    if (EzThrottler.Throttle("AF_FeedCuriel", 2000))
+                    {
+                        StatusText("Feeding Curiel Root");
+                        InventoryUtil.UseItem(Data.GameItems.CurielRoot);
+                    }
+                }
+                Advance(StableStep.Done);
+                return false;
+            }
+
+            default: // Done
+            {
+                // Close any lingering menu and finish the routine for this cycle.
+                if (TryGetSelectString(out var ss)) { CloseSelectString(ss); return false; }
+                _step = StableStep.Interact;
+                _stepStartedUtc = DateTime.MinValue;
+                Svc.Log.Information("[Chocobo] Stable cycle complete; resuming farming.");
+                return true;
+            }
+        }
+    }
+
+    private static void Advance(StableStep next)
+    {
+        _step = next;
+        _stepStartedUtc = DateTime.UtcNow;
+    }
+
+    private static void StatusText(string s) => Svc.Log.Debug($"[Chocobo] {s}");
+
+    // -------------------------------------------------- stable object + menu helpers
+    /// <summary>Find the nearest chocobo stable EventObj (housing furnishing) within ~10y.</summary>
+    private static IGameObject? FindStable()
+    {
+        IGameObject? best = null;
+        var bestDist = float.MaxValue;
+        var me = Player.Object;
+        if (me == null) return null;
+        foreach (var o in Svc.Objects)
         {
-            if (EzThrottler.Throttle("AF_NoFeed", 30000))
-                Svc.Chat.Print("[AutoFates] No chocobo feed remaining; resuming farming until next stable.");
+            // Stables are EventObj furnishings; match by name to be safe.
+            if (o.ObjectKind != Dalamud.Game.ClientState.Objects.Enums.ObjectKind.EventObj) continue;
+            var name = o.Name.TextValue;
+            if (string.IsNullOrEmpty(name) || !name.Contains("Stable", StringComparison.OrdinalIgnoreCase)) continue;
+            var d = System.Numerics.Vector3.Distance(me.Position, o.Position);
+            if (d < bestDist) { bestDist = d; best = o; }
+        }
+        return best;
+    }
+
+    private static bool TryGetSelectString(out AddonMaster.SelectString ss)
+    {
+        ss = default!;
+        if (ECommons.GenericHelpers.TryGetAddonByName<AtkBase>("SelectString", out var addon)
+            && ECommons.GenericHelpers.IsAddonReady(addon))
+        {
+            ss = new AddonMaster.SelectString((nint)addon);
             return true;
         }
+        return false;
+    }
 
-        return true;
+    /// <summary>Select a SelectString entry whose text matches the predicate. Returns true if clicked.</summary>
+    private static bool TrySelectEntry(Func<string, bool> match)
+    {
+        if (!TryGetSelectString(out var ss)) return false;
+        if (!EzThrottler.Throttle("AF_StableSelect", 1500)) return false;
+        foreach (var e in ss.Entries)
+        {
+            if (match(e.Text))
+            {
+                Svc.Log.Debug($"[Chocobo] Selecting menu entry '{e.Text}'.");
+                e.Select();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void CloseSelectString(AddonMaster.SelectString ss)
+    {
+        if (!EzThrottler.Throttle("AF_StableClose", 1000)) return;
+        // "Cancel"/last entry usually closes; try a Cancel-labelled entry, else fire callback -1.
+        foreach (var e in ss.Entries)
+            if (e.Text.Contains("Cancel", StringComparison.OrdinalIgnoreCase) || e.Text.Contains("Quit", StringComparison.OrdinalIgnoreCase))
+            { e.Select(); return; }
+        if (ECommons.GenericHelpers.TryGetAddonByName<AtkBase>("SelectString", out var addon))
+            Callback.Fire(addon, true, -1);
     }
 
     private static bool AtHome(Configuration c)
