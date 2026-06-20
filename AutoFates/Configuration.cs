@@ -140,6 +140,9 @@ public sealed class Configuration
     /// <summary>Display name of the captured stable entity (for the UI).</summary>
     public string StableName = string.Empty;
     public bool AutoCleanStable = true;
+    /// <summary>Persisted UTC of the last stable/train (the ~1h cooldown). Survives reloads so we
+    /// don't immediately re-stable after fetching the chocobo back out.</summary>
+    public long LastStableUnixMs = 0;
 
     // ------------------------------------------------------------------ Consumables
     public bool UseFood = false;

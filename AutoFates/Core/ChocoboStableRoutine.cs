@@ -37,8 +37,22 @@ public static unsafe class ChocoboStableRoutine
         ShowError = false,
     });
 
-    // Tracks the last time we stabled, to respect the ~1 hour cooldown.
-    private static DateTime _lastStableUtc = DateTime.MinValue;
+    // Tracks the last time we stabled, to respect the ~1 hour cooldown. Persisted to config so it
+    // survives plugin reloads (otherwise we'd immediately re-stable after a fetch).
+    private static DateTime _lastStableUtc
+    {
+        get => Plugin.C is { LastStableUnixMs: > 0 } c
+            ? DateTimeOffset.FromUnixTimeMilliseconds(c.LastStableUnixMs).UtcDateTime
+            : DateTime.MinValue;
+        set
+        {
+            if (Plugin.C is { } c)
+            {
+                c.LastStableUnixMs = new DateTimeOffset(value, TimeSpan.Zero).ToUnixTimeMilliseconds();
+                c.Save();
+            }
+        }
+    }
     private static readonly TimeSpan StableCooldown = TimeSpan.FromMinutes(60);
 
     /// <summary>Does the chocobo need stabling/feeding attention right now?</summary>
@@ -352,6 +366,7 @@ public static unsafe class ChocoboStableRoutine
                 if (TryConfirmYesno())
                 {
                     StatusText("Fetched; resuming farming");
+                    _lastStableUtc = DateTime.UtcNow; // ensure cooldown is stamped so we don't re-stable
                     Advance(StableStep.Done);
                     return false;
                 }
