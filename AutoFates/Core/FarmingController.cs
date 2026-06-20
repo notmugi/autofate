@@ -342,17 +342,10 @@ public sealed unsafe class FarmingController
             return;
         }
 
-        StatusText = $"Traveling to fate: {fate.Name}";
-
-        // Drive toward the fate center, stopping just inside its radius.
-        var stopRange = Math.Max(2f, fate.Radius * 0.7f);
-        var arrived = Navigator.MoveTo(C, fate.Position, stopRange);
-
-        // Sync to the fate once we're actually inside it (avoid syncing to pass-through fates).
-        if (C.AutoLevelSync && IsInsideFate(fate))
-            SyncToFate();
-
-        if (arrived || IsInsideFate(fate))
+        // ARRIVAL FIRST: once we're inside the fate ring we've arrived. We must NOT call MoveTo
+        // again here, or it will re-mount us for the (still > MountDistanceThreshold) distance to
+        // the fate center while the arrival logic dismounts us — causing a mount/dismount loop.
+        if (IsInsideFate(fate))
         {
             Navigator.Stop();
 
@@ -361,14 +354,22 @@ public sealed unsafe class FarmingController
             {
                 StatusText = $"Arrived at fate: {fate.Name} (dismounting)";
                 Features.MountManager.Dismount();
-                return; // re-check next tick; once dismounted we proceed to InFate
+                return; // re-check next tick; once dismounted we proceed below
             }
 
+            // Sync once we're actually inside (avoids syncing to pass-through fates).
+            if (C.AutoLevelSync) SyncToFate();
+
             Stats.OnFateAttempted();
-            // (Re)engage the combat backend now that we're on the ground inside the fate.
-            IPCManager.StartCombat(C);
+            IPCManager.StartCombat(C); // (re)engage now that we're grounded inside the fate
             State = FarmState.InFate;
+            return;
         }
+
+        // Not inside the ring yet: keep navigating toward the fate center.
+        StatusText = $"Traveling to fate: {fate.Name}";
+        var stopRange = Math.Max(2f, fate.Radius * 0.7f);
+        Navigator.MoveTo(C, fate.Position, stopRange);
     }
 
     private bool IsInsideFate(IFate fate)
@@ -405,9 +406,10 @@ public sealed unsafe class FarmingController
         var type = FateSelector.Classify(fate);
         StatusText = $"In fate: {fate.Name} ({type}) {fate.Progress}%";
 
-        // Keep ourselves inside the fate ring if we've drifted out.
-        if (!IsInsideFate(fate) && !ECommons.GenericHelpers.IsOccupied())
-            Navigator.MoveTo(C, fate.Position, Math.Max(2f, fate.Radius * 0.6f));
+        // Keep ourselves inside the fate ring if we've drifted out. Don't do this when the combat
+        // backend (BMR AI) is driving movement, and never re-mount for these short hops.
+        if (!BmrMovementActive() && !IsInsideFate(fate) && !ECommons.GenericHelpers.IsOccupied())
+            Navigator.MoveTo(C, fate.Position, Math.Max(2f, fate.Radius * 0.6f), allowMount: false);
 
         switch (type)
         {

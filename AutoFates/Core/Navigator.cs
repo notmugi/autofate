@@ -31,7 +31,7 @@ public static class Navigator
     /// Handles mounting/flying. Returns true once we are within range of the destination.
     /// Call repeatedly (idempotent / throttled internally by vnavmesh).
     /// </summary>
-    public static bool MoveTo(Configuration c, Vector3 dest, float stopRange = 3f)
+    public static bool MoveTo(Configuration c, Vector3 dest, float stopRange = 3f, bool allowMount = true)
     {
         var me = Player.Object;
         if (me == null) return false;
@@ -62,8 +62,9 @@ public static class Navigator
 
         var fly = MountManager.ShouldFly(c);
 
-        // Mount up for long trips if configured.
-        if (c.UseMount && !MountManager.IsMounted && dist > c.MountDistanceThreshold && MountManager.CanMountHere)
+        // Mount up for long trips if configured. Short in-fate repositioning passes allowMount=false
+        // so we never re-mount for tiny hops (which previously caused a mount/dismount loop).
+        if (allowMount && c.UseMount && !MountManager.IsMounted && dist > c.MountDistanceThreshold && MountManager.CanMountHere)
         {
             MountManager.Mount(c);
             // While the mount animation plays, hold off on pathing this frame.
