@@ -1,0 +1,625 @@
+using System.Linq;
+using System.Numerics;
+using AutoFates.Features;
+using AutoFates.IPC;
+using Dalamud.Game.ClientState.Fates;
+using ECommons.DalamudServices;
+using ECommons.GameHelpers;
+using ECommons.Throttlers;
+using FFXIVClientStructs.FFXIV.Client.Game.Fate;
+using FateState = Dalamud.Game.ClientState.Fates.FateState;
+
+namespace AutoFates.Core;
+
+/// <summary>
+/// The main fate-farming state machine. Ticked every frame from the plugin's Framework.Update.
+/// Decides where to go, which fate to run, hands combat to the configured backend, and runs
+/// maintenance (consumables, repair, chocobo, gemstone shopping) between fates.
+/// </summary>
+public sealed unsafe class FarmingController
+{
+    public bool Running { get; private set; }
+    public FarmState State { get; private set; } = FarmState.Idle;
+    public StopReason LastStopReason { get; private set; } = StopReason.None;
+    public string StatusText { get; private set; } = "Idle";
+    public SessionStats Stats { get; } = new();
+
+    private Configuration C => Plugin.C;
+
+    // Active target fate + zone bookkeeping.
+    private ushort _targetFateId;
+    private uint _targetTerritory;
+    private int _zoneRotationIndex;
+    private readonly Dictionary<uint, int> _zoneFatesDone = new();
+
+    // Collect-fate hand-in math.
+    private int _collectTurnedIn;
+    private int _collectEstimatedNeeded;
+
+    // ---------------------------------------------------------------- lifecycle
+    public void Start()
+    {
+        if (Running) return;
+
+        if (!IPCManager.ValidateBackends(C, out var error))
+        {
+            Svc.Chat.PrintError($"[AutoFates] {error}");
+            return;
+        }
+
+        Running = true;
+        LastStopReason = StopReason.None;
+        Stats.Reset();
+        _zoneRotationIndex = 0;
+        _zoneFatesDone.Clear();
+        State = FarmState.SelectingZone;
+        StatusText = "Starting...";
+        IPCManager.StartCombat(C);
+        Svc.Chat.Print("[AutoFates] Farming started.");
+        Svc.Log.Information("[AutoFates] Started in mode " + C.Mode);
+    }
+
+    public void Stop(StopReason reason = StopReason.UserRequested)
+    {
+        if (!Running) return;
+        Running = false;
+        LastStopReason = reason;
+        State = FarmState.Stopped;
+        StatusText = $"Stopped ({reason})";
+        IPCManager.StopCombat(C);
+        Navigator.Stop();
+        if (BossModIPC.IsInstalled) BossModIPC.AiEnable(false);
+
+        Svc.Chat.Print($"[AutoFates] Farming stopped: {reason}.");
+        Svc.Log.Information($"[AutoFates] Stopped: {reason}");
+
+        // Optional lifestream-to-destination when finishing.
+        if (reason != StopReason.Error && C.LifestreamOnFinish && !string.IsNullOrWhiteSpace(C.LifestreamFinishCommand))
+        {
+            Teleporter.LifestreamCommand(C.LifestreamFinishCommand);
+        }
+    }
+
+    public void Toggle()
+    {
+        if (Running) Stop();
+        else Start();
+    }
+
+    // ---------------------------------------------------------------- main tick
+    public void Tick()
+    {
+        if (!Running) return;
+        if (Player.Object == null) return;             // not logged in
+        if (Svc.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.BetweenAreas]) return;
+
+        Stats.CurrentLevel = Player.Level;
+        Stats.SampleGemstones();
+
+        // Hard stop triggers (checked every tick).
+        if (CheckStopTriggers()) return;
+
+        // Always-on maintenance that can run in parallel with farming.
+        ConsumableManager.Tick(C);
+        ChocoboManager.Tick(C);
+
+        switch (State)
+        {
+            case FarmState.SelectingZone: TickSelectingZone(); break;
+            case FarmState.TravelingToZone: TickTravelingToZone(); break;
+            case FarmState.SelectingFate: TickSelectingFate(); break;
+            case FarmState.TravelingToFate: TickTravelingToFate(); break;
+            case FarmState.InFate: TickInFate(); break;
+            case FarmState.CollectTurnIn: TickInFate(); break; // collect handled inside InFate
+            case FarmState.Maintenance: TickMaintenance(); break;
+            case FarmState.ChocoboLeveling: TickChocoboLeveling(); break;
+            case FarmState.GemstoneShopping: TickGemstoneShopping(); break;
+            default: State = FarmState.SelectingZone; break;
+        }
+    }
+
+    // ---------------------------------------------------------------- stop triggers
+    private bool CheckStopTriggers()
+    {
+        if (C.StopAtLevel && Player.Level >= C.DesiredLevel)
+        {
+            Stop(StopReason.LevelReached);
+            return true;
+        }
+
+        if (C.StopAtGemstoneCount && Stats.GemstonesGained >= C.GemstoneStopCount)
+        {
+            Stop(StopReason.GemstoneCountReached);
+            return true;
+        }
+
+        if (C.StopAtChocoboMaxed && C.ChocoboCompanionEnabled && ChocoboManager.ReachedTargetLevel(C))
+        {
+            Stop(StopReason.ChocoboMaxed);
+            return true;
+        }
+
+        if (C.StopAtVendorRequirementMet && C.EnableGemstoneShopping && C.GemstoneBuyList.Count > 0
+            && GemstoneShopper.AllTargetsMet(C)
+            && C.GemstoneBuyList.All(e => !e.Enabled || e.TargetQuantity > 0))
+        {
+            Stop(StopReason.VendorRequirementMet);
+            return true;
+        }
+
+        // Repair safety: out of dark matter for self-repair.
+        if (C.AutoRepair && C.RepairMode == RepairMode.SelfRepair
+            && RepairManager.NeedsRepair(C) && !RepairManager.CanSelfRepair())
+        {
+            Svc.Chat.PrintError("[AutoFates] Out of dark matter for self-repair. Stopping.");
+            Stop(StopReason.OutOfDarkMatter);
+            return true;
+        }
+
+        return false;
+    }
+
+    // ---------------------------------------------------------------- zone selection
+    private uint[] GetModeZones()
+    {
+        switch (C.Mode)
+        {
+            case FarmingMode.SingleZone:
+                return C.SingleZoneTerritory != 0 ? new[] { C.SingleZoneTerritory } : Array.Empty<uint>();
+            case FarmingMode.Manual:
+                return C.ManualZones.Select(z => z.TerritoryId).Where(t => t != 0).ToArray();
+            case FarmingMode.Atma:
+            case FarmingMode.Demiatma:
+            case FarmingMode.LuminousCrystals:
+            case FarmingMode.Memories:
+                return Data.Zones.ForMode(C.Mode).Select(z => z.TerritoryId).Where(t => t != 0).ToArray();
+            case FarmingMode.SharedFates:
+                return Data.Zones.SharedFateZones().Select(z => z.TerritoryId).ToArray();
+            case FarmingMode.Leveling:
+                // Leveling: stay in current zone if it has fates in our level range, else use shared fates.
+                return new[] { Svc.ClientState.TerritoryType };
+            default:
+                return Array.Empty<uint>();
+        }
+    }
+
+    private void TickSelectingZone()
+    {
+        StatusText = "Selecting zone";
+
+        // Maintenance gating before we pick a zone (repair/chocobo/shop take priority).
+        if (TryEnterMaintenance()) return;
+
+        var here = Svc.ClientState.TerritoryType;
+
+        // If the current zone is a valid farming zone and has candidate fates, stay.
+        var zones = GetModeZones();
+        if (zones.Length == 0)
+        {
+            if (EzThrottler.Throttle("AF_NoZones", 10000))
+                Svc.Chat.PrintError("[AutoFates] No zones configured for this mode.");
+            return;
+        }
+
+        // Manual mode rotation handling.
+        if (C.Mode == FarmingMode.Manual)
+        {
+            HandleManualZoneSelection(zones);
+            return;
+        }
+
+        // For fixed-list modes, prefer the current zone if it's in the list and has fates.
+        if (zones.Contains(here) && FateSelector.GetCandidates(C).Count > 0)
+        {
+            _targetTerritory = here;
+            State = FarmState.SelectingFate;
+            return;
+        }
+
+        // Otherwise pick the first zone in the list (round-robin) and travel.
+        _targetTerritory = zones[_zoneRotationIndex % zones.Length];
+        if (_targetTerritory == here)
+        {
+            // We're here but no fates currently; either wait or rotate.
+            if (zones.Length > 1)
+            {
+                _zoneRotationIndex++;
+                _targetTerritory = zones[_zoneRotationIndex % zones.Length];
+            }
+            else
+            {
+                State = FarmState.SelectingFate; // single zone, just wait for fates
+                return;
+            }
+        }
+        State = FarmState.TravelingToZone;
+    }
+
+    private void HandleManualZoneSelection(uint[] zones)
+    {
+        var entries = C.ManualZones.Where(z => z.TerritoryId != 0).ToList();
+        if (entries.Count == 0) return;
+
+        // Find the current entry; advance if its quota is met.
+        if (_zoneRotationIndex >= entries.Count)
+        {
+            if (C.ManualLoop) _zoneRotationIndex = 0;
+            else { Stop(StopReason.UserRequested); return; }
+        }
+        var entry = entries[_zoneRotationIndex];
+
+        if (entry.FatesToRun > 0 && entry.FatesDone >= entry.FatesToRun)
+        {
+            _zoneRotationIndex++;
+            return;
+        }
+
+        _targetTerritory = entry.TerritoryId;
+        if (Svc.ClientState.TerritoryType == _targetTerritory)
+            State = FarmState.SelectingFate;
+        else
+            State = FarmState.TravelingToZone;
+    }
+
+    private void TickTravelingToZone()
+    {
+        StatusText = $"Traveling to {Data.Zones.GetTerritoryName(_targetTerritory)}";
+        if (Teleporter.TravelToTerritory(C, _targetTerritory))
+        {
+            State = FarmState.SelectingFate;
+        }
+    }
+
+    // ---------------------------------------------------------------- fate selection
+    private void TickSelectingFate()
+    {
+        // Follow-party-leader mode: don't pick our own fate, just follow.
+        if (C.FollowPartyLeader)
+        {
+            TickFollowLeader();
+            return;
+        }
+
+        if (TryEnterMaintenance()) return;
+
+        StatusText = "Selecting fate";
+        var best = FateSelector.PickBest(C);
+        if (best == null)
+        {
+            // No valid fate right now. In multi-zone modes, rotate after a wait.
+            if (EzThrottler.Throttle("AF_NoFate", 8000))
+            {
+                var zones = GetModeZones();
+                if (zones.Length > 1)
+                {
+                    _zoneRotationIndex++;
+                    State = FarmState.SelectingZone;
+                }
+            }
+            return;
+        }
+
+        _targetFateId = best.Value.Fate.FateId;
+        _collectTurnedIn = 0;
+        _collectEstimatedNeeded = 0;
+        State = FarmState.TravelingToFate;
+    }
+
+    private void TickTravelingToFate()
+    {
+        var fate = FateSelector.GetFateById(_targetFateId);
+        if (fate == null || fate.State == FateState.Ended || fate.State == FateState.Failed)
+        {
+            Navigator.Stop();
+            State = FarmState.SelectingFate;
+            return;
+        }
+
+        StatusText = $"Traveling to fate: {fate.Name}";
+
+        // Drive toward the fate center, stopping just inside its radius.
+        var stopRange = Math.Max(2f, fate.Radius * 0.7f);
+        var arrived = Navigator.MoveTo(C, fate.Position, stopRange);
+
+        // Sync to the fate once we're actually inside it (avoid syncing to pass-through fates).
+        if (C.AutoLevelSync && IsInsideFate(fate))
+            SyncToFate();
+
+        if (arrived || IsInsideFate(fate))
+        {
+            Navigator.Stop();
+            Stats.OnFateAttempted();
+            State = FarmState.InFate;
+        }
+    }
+
+    private bool IsInsideFate(IFate fate)
+    {
+        var me = Player.Object;
+        if (me == null) return false;
+        return Vector3.Distance(me.Position, fate.Position) <= fate.Radius;
+    }
+
+    private void SyncToFate()
+    {
+        if (!EzThrottler.Throttle("AF_FateSync", 1000)) return;
+        try
+        {
+            var fm = FateManager.Instance();
+            if (fm == null) return;
+            // Only sync if not already synced (LevelSync toggles).
+            if (fm->SyncedFateId == 0)
+                fm->LevelSync();
+        }
+        catch (Exception e) { Svc.Log.Verbose($"[Controller] SyncToFate failed: {e.Message}"); }
+    }
+
+    // ---------------------------------------------------------------- in-fate
+    private void TickInFate()
+    {
+        var fate = FateSelector.GetFateById(_targetFateId);
+        if (fate == null || fate.State == FateState.Ended || fate.State == FateState.Failed)
+        {
+            OnFateFinished();
+            return;
+        }
+
+        var type = FateSelector.Classify(fate);
+        StatusText = $"In fate: {fate.Name} ({type}) {fate.Progress}%";
+
+        // Keep ourselves inside the fate ring if we've drifted out.
+        if (!IsInsideFate(fate) && !ECommons.GenericHelpers.IsOccupied())
+            Navigator.MoveTo(C, fate.Position, Math.Max(2f, fate.Radius * 0.6f));
+
+        switch (type)
+        {
+            case FateType.Collect:
+                HandleCollectFate(fate);
+                break;
+            case FateType.Escort:
+                HandleEscortFate(fate);
+                break;
+            default:
+                // Battle / Boss / Defend: combat backend does the work. We just make sure we have a target.
+                EnsureCombatEngaged(fate);
+                break;
+        }
+
+        // Fate completed by progress.
+        if (fate.Progress >= 100)
+            OnFateFinished();
+    }
+
+    private void EnsureCombatEngaged(IFate fate)
+    {
+        // BMR AI / RSR / Wrath handle target selection & rotation. For RSR we can nudge priority.
+        // Mass-pull vs. careful: if mass pull is off, we rely on the backend's targeting.
+        if (BmrMovementActive())
+        {
+            // BMR AI navigates and fights; nothing else to do.
+            return;
+        }
+
+        // Non-BMR movement: ensure we keep within the fate and let rotation backend attack.
+        if (!Svc.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.InCombat]
+            && Svc.Targets.Target == null
+            && EzThrottler.Throttle("AF_AcquireTarget", 1000))
+        {
+            AcquireFateTarget(fate);
+        }
+    }
+
+    private bool BmrMovementActive() => IPCManager.BmrHandlesMovement(C);
+
+    private void AcquireFateTarget(IFate fate)
+    {
+        // Target the nearest enemy that belongs to this fate.
+        var me = Player.Object;
+        if (me == null) return;
+        Dalamud.Game.ClientState.Objects.Types.IGameObject? nearest = null;
+        var nearestDist = float.MaxValue;
+        foreach (var obj in Svc.Objects)
+        {
+            if (obj is not Dalamud.Game.ClientState.Objects.Types.IBattleNpc bnpc) continue;
+            if (bnpc.IsDead) continue;
+            // Fate mobs share the fate's EventId / are within the ring.
+            var d = Vector3.Distance(me.Position, bnpc.Position);
+            if (d > fate.Radius + 5f) continue;
+            if (d < nearestDist) { nearestDist = d; nearest = bnpc; }
+        }
+        if (nearest != null)
+            Svc.Targets.Target = nearest;
+    }
+
+    // ---------------------------------------------------------------- collect fates
+    private void HandleCollectFate(IFate fate)
+    {
+        // Collect fates: we don't need to "complete" them, just hit the turn-in threshold.
+        // Strategy: pick up items / kill mobs (handled by combat backend + looting), then turn in.
+        // We estimate needed turn-ins by turning in an initial batch and using the progress delta.
+        var collectItemId = FateSelector.GetCollectItemId(fate);
+
+        // For now, keep the player engaged (grab items, fight if aggroed) via the combat backend,
+        // and periodically attempt a turn-in when we have items. The precise turn-in addon flow is
+        // flagged for in-game tuning.
+        StatusText = $"Collect fate: {fate.Name} {fate.Progress}% (item {collectItemId})";
+
+        if (BmrMovementActive())
+            return; // BMR will move us around; manual item pickup is a tuning follow-up
+
+        // Fallback movement: orbit the fate center.
+        if (!ECommons.GenericHelpers.IsOccupied())
+            Navigator.MoveTo(C, fate.Position, Math.Max(2f, fate.Radius * 0.5f));
+    }
+
+    // ---------------------------------------------------------------- escort fates
+    private void HandleEscortFate(IFate fate)
+    {
+        // Escort: follow the escorted NPC (do NOT run ahead), defend it. The NPC is the fate's
+        // associated object; we trail it at a short distance and let combat handle threats.
+        StatusText = $"Escort fate: {fate.Name} {fate.Progress}%";
+
+        if (BmrMovementActive())
+            return; // BMR follow/defend behaviour
+
+        // Fallback: stay near the fate center (which tracks the moving escort objective).
+        if (!ECommons.GenericHelpers.IsOccupied())
+            Navigator.MoveTo(C, fate.Position, 4f);
+    }
+
+    private void OnFateFinished()
+    {
+        Stats.OnFateCompleted();
+        Navigator.Stop();
+
+        // Per-zone counters (manual mode quota).
+        var terr = Svc.ClientState.TerritoryType;
+        _zoneFatesDone.TryGetValue(terr, out var done);
+        _zoneFatesDone[terr] = done + 1;
+
+        if (C.Mode == FarmingMode.Manual)
+        {
+            var entry = C.ManualZones.FirstOrDefault(z => z.TerritoryId == terr);
+            if (entry != null) entry.FatesDone++;
+        }
+
+        _targetFateId = 0;
+        State = FarmState.SelectingFate;
+    }
+
+    // ---------------------------------------------------------------- follow leader
+    private void TickFollowLeader()
+    {
+        StatusText = "Following party leader";
+
+        if (Svc.Party.Length == 0)
+        {
+            if (EzThrottler.Throttle("AF_NoParty", 8000))
+                Svc.Chat.PrintError("[AutoFates] Follow-leader enabled but you are not in a party.");
+            return;
+        }
+
+        // Prefer BMR's native follow if BMR handles movement.
+        if (BmrMovementActive())
+        {
+            var leaderIdx = Svc.Party.PartyLeaderIndex;
+            if (EzThrottler.Throttle("AF_BmrFollow", 5000))
+                BossModIPC.AiFollow((int)leaderIdx);
+            return;
+        }
+
+        // Manual follow via vnavmesh.
+        var leader = GetPartyLeaderObject();
+        if (leader == null) return;
+        Navigator.MoveTo(C, leader.Position, C.FollowDistance);
+
+        // If a fate is active and we're inside it, sync.
+        var fate = FateSelector.GetCurrentFate();
+        if (fate != null && C.AutoLevelSync) SyncToFate();
+    }
+
+    private Dalamud.Game.ClientState.Objects.Types.IGameObject? GetPartyLeaderObject()
+    {
+        var idx = Svc.Party.PartyLeaderIndex;
+        if (idx >= Svc.Party.Length) return null;
+        var member = Svc.Party[(int)idx];
+        return member?.GameObject;
+    }
+
+    // ---------------------------------------------------------------- maintenance gating
+    /// <summary>If any maintenance task is needed, switch into the appropriate state. Returns true if entered.</summary>
+    private bool TryEnterMaintenance()
+    {
+        // Chocobo leveling has priority when the chocobo needs stabling/feeding.
+        if (C.ChocoboLevelingEnabled && ChocoboStableRoutine.NeedsAttention(C))
+        {
+            State = FarmState.ChocoboLeveling;
+            return true;
+        }
+
+        // Repair.
+        if (C.AutoRepair && RepairManager.NeedsRepair(C))
+        {
+            State = FarmState.Maintenance;
+            return true;
+        }
+
+        // Gemstone shopping.
+        if (GemstoneShopper.ShouldShop(C))
+        {
+            State = FarmState.GemstoneShopping;
+            return true;
+        }
+
+        return false;
+    }
+
+    private void TickMaintenance()
+    {
+        StatusText = "Maintenance: repair";
+        if (!RepairManager.NeedsRepair(C))
+        {
+            State = FarmState.SelectingZone;
+            return;
+        }
+
+        // Self-repair flow.
+        if (C.RepairMode == RepairMode.SelfRepair)
+        {
+            if (!RepairManager.CanSelfRepair())
+            {
+                Stop(StopReason.OutOfDarkMatter);
+                return;
+            }
+            ChocoboStableRoutine.RunSelfRepair(C);
+            // RunSelfRepair drives a TaskManager; when durability recovers we exit.
+            if (!RepairManager.NeedsRepair(C))
+                State = FarmState.SelectingZone;
+            return;
+        }
+
+        // NPC repair is a tuning follow-up; for now warn and continue.
+        if (EzThrottler.Throttle("AF_NpcRepair", 30000))
+            Svc.Chat.PrintError("[AutoFates] NPC repair not yet automated; switch to self-repair.");
+        State = FarmState.SelectingZone;
+    }
+
+    private void TickChocoboLeveling()
+    {
+        StatusText = "Chocobo leveling";
+        if (ChocoboStableRoutine.Tick(C))
+        {
+            // Routine finished (either fed & ready, or chocobo maxed).
+            if (C.StopAtChocoboMaxed && ChocoboManager.ReachedTargetLevel(C))
+                Stop(StopReason.ChocoboMaxed);
+            else
+                State = FarmState.SelectingZone;
+        }
+    }
+
+    private void TickGemstoneShopping()
+    {
+        StatusText = "Gemstone shopping";
+
+        // If the shop addon is open, purchase; otherwise we need to reach the vendor.
+        if (GemstoneShopper.ShopOpen())
+        {
+            if (GemstoneShopper.PurchaseTick(C))
+            {
+                // Close the shop and resume.
+                if (EzThrottler.Throttle("AF_CloseShop", 500))
+                    ECommons.Automation.Chat.ExecuteCommand("/automove off"); // no-op safety
+                State = FarmState.SelectingZone;
+            }
+            return;
+        }
+
+        // Reaching the vendor automatically is a tuning follow-up (requires vendor NPC location).
+        // For now, if the shop isn't open and we can't open it, warn and resume.
+        if (EzThrottler.Throttle("AF_GemVendorNav", 30000))
+            Svc.Chat.Print("[AutoFates] Open the bicolor gemstone vendor to auto-purchase your buy list.");
+
+        if (!GemstoneShopper.ShouldShop(C))
+            State = FarmState.SelectingZone;
+    }
+}

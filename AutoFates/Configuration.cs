@@ -1,0 +1,151 @@
+using ECommons.Configuration;
+
+namespace AutoFates;
+
+#pragma warning disable CS0618 // EzConfig works with any plain class
+
+/// <summary>A single user-defined zone entry for Manual mode.</summary>
+public sealed class ManualZoneEntry
+{
+    public uint TerritoryId;
+    public string Name = string.Empty;
+    /// <summary>How many fates to complete in this zone before moving on. 0 = unlimited.</summary>
+    public int FatesToRun = 5;
+    /// <summary>Live counter of fates done in this zone this session.</summary>
+    public int FatesDone;
+
+    public void ResetCounter() => FatesDone = 0;
+}
+
+/// <summary>A bicolor gemstone shop buy-list entry.</summary>
+public sealed class GemstoneBuyEntry
+{
+    public uint ItemId;
+    public string Name = string.Empty;
+    /// <summary>Stop buying once we own this many. 0 = buy continuously while farming.</summary>
+    public int TargetQuantity;
+    public bool Enabled = true;
+}
+
+public sealed class Configuration
+{
+    public int Version { get; set; } = 1;
+
+    // ------------------------------------------------------------------ Mode
+    public FarmingMode Mode = FarmingMode.Atma;
+
+    // Single zone
+    public uint SingleZoneTerritory;
+
+    // Manual mode
+    public List<ManualZoneEntry> ManualZones = new();
+    public bool ManualLoop = true;
+
+    // ------------------------------------------------------------------ Navigation / mount
+    /// <summary>Use a mount for long-distance travel via vnavmesh.</summary>
+    public bool UseMount = true;
+    /// <summary>Fly when the zone allows it (flight unlocked).</summary>
+    public bool UseFlight = true;
+    /// <summary>Preferred mount id (0 = Mount Roulette / first available).</summary>
+    public uint PreferredMountId;
+    public string PreferredMountName = "Mount Roulette";
+    /// <summary>Distance (yalms) beyond which we bother mounting before traveling.</summary>
+    public float MountDistanceThreshold = 20f;
+
+    // ------------------------------------------------------------------ Fate engine
+    public FateType EnabledFateTypes = FateType.All;
+    /// <summary>Continue running fates up to this many levels above the player's level.</summary>
+    public int LevelsAbovePlayer = 2;
+    /// <summary>Ignore fates with less than this many seconds remaining.</summary>
+    public int MinFateTimeSeconds = 120;
+    /// <summary>Prefer fates that are lower on their timer over closer ones.</summary>
+    public bool PrioritizeLowTimer = true;
+    /// <summary>Sync level to the fate we travel to (and avoid syncing to pass-through fates).</summary>
+    public bool AutoLevelSync = true;
+    /// <summary>Pull every enemy in the fate area.</summary>
+    public bool MassPull = false;
+    /// <summary>Keep this distance (yalms) from non-fate enemies to avoid aggro.</summary>
+    public float SafeDistance = 8f;
+    /// <summary>Self AOE dodging when not using BMR for movement.</summary>
+    public bool AutoDodgeAoe = true;
+
+    // Collect fate tuning
+    public int CollectInitialTurnIn = 5;
+
+    // ------------------------------------------------------------------ Combat backends
+    public CombatBackend MovementBackend = CombatBackend.BossModReborn; // movement + AOE
+    public CombatBackend RotationBackend = CombatBackend.WrathCombo;    // damage rotation
+    public string BmrPreset = "AutoFates"; // BMR preset to activate
+
+    // ------------------------------------------------------------------ Party follow
+    public bool FollowPartyLeader = false;
+    public float FollowDistance = 3f;
+
+    // ------------------------------------------------------------------ Leveling / stop triggers
+    public int DesiredLevel = 100;                 // stop leveling at this level
+    public bool StopAtLevel = false;
+    public bool StopAtGemstoneCount = false;
+    public int GemstoneStopCount = 1000;
+    public bool StopAtChocoboMaxed = false;
+    public bool StopAtVendorRequirementMet = false;
+
+    // ------------------------------------------------------------------ Lifestream
+    public bool UseLifestream = true;
+    /// <summary>Lifestream command to run when farming completes (e.g. "/li home").</summary>
+    public string LifestreamFinishCommand = string.Empty;
+    public bool LifestreamOnFinish = false;
+
+    // ------------------------------------------------------------------ Chocobo
+    public bool ChocoboCompanionEnabled = true;
+    public ChocoboStance ChocoboStance = ChocoboStance.Attacker;
+    public bool AutoHealerStance = true;
+    public int HealerStanceHpThreshold = 50; // % HP to switch to healer
+    public bool AutoGysahlGreens = true;
+    public int GysahlReuseSeconds = 60; // re-summon when companion timer below this
+
+    // Chocobo leveling
+    public bool ChocoboLevelingEnabled = false;
+    public int ChocoboTargetLevel = 20;
+    /// <summary>Home destination type for stabling: 0 FC, 1 Private, 2 Apartment, 3 Shared.</summary>
+    public int ChocoboHomeType = 0;
+    public string ChocoboHomeLifestreamCommand = "/li home";
+    public System.Numerics.Vector3 StablePosition;
+    public uint StableTerritory;
+    public bool StablePositionSet = false;
+    public bool AutoCleanStable = true;
+
+    // ------------------------------------------------------------------ Consumables
+    public bool UseFood = false;
+    public uint FoodItemId;
+    public bool FoodIsHq;
+    public bool UsePotion = false;
+    public uint PotionItemId;
+    public bool PotionIsHq;
+    /// <summary>Re-apply food/pot when remaining time drops below this many seconds.</summary>
+    public int ConsumableReuseSeconds = 60;
+
+    // ------------------------------------------------------------------ Repair
+    public bool AutoRepair = true;
+    public int RepairThresholdPercent = 30;
+    public RepairMode RepairMode = RepairMode.SelfRepair;
+    public int RepairGearsetNumber = 1; // crafter gearset for self-repair
+
+    // ------------------------------------------------------------------ Retainer / saddlebag
+    public bool UseRetainerStorage = false;
+    public bool UseSaddlebag = false;
+    public List<uint> AutoStoreItemIds = new();
+
+    // ------------------------------------------------------------------ Gemstone shop
+    public bool EnableGemstoneShopping = false;
+    public List<GemstoneBuyEntry> GemstoneBuyList = new();
+    /// <summary>Open the vendor once we hold at least this many gemstones.</summary>
+    public int GemstoneBuyThreshold = 1000;
+    /// <summary>Which gemstone vendor NPC to buy from (place name / npc identifier).</summary>
+    public string GemstoneVendor = "Gemstone Trader";
+
+    // ------------------------------------------------------------------ UI / misc
+    public bool VerboseLogging = false;
+    public bool OpenOnLogin = false;
+
+    public void Save() => EzConfig.Save();
+}
