@@ -191,7 +191,27 @@ public static unsafe class ChocoboStableRoutine
 
             case StableStep.ChooseStable:
             {
-                // Click the "Stable my Chocobo" entry (matched by text).
+                // Branch on the menu contents to auto-resume from the correct stage:
+                //  - "Stable my Chocobo" present  => chocobo is OUT => stable it, then train/feed/fetch.
+                //  - "Tend to my Chocobo" present => chocobo is ALREADY stabled. We were interrupted
+                //    before fetching, so just Tend -> Fetch it back out (don't re-train; likely on
+                //    cooldown). Leveling then re-evaluates with the chocobo out.
+                var entries = GetMenuEntries();
+                if (entries.Count == 0) return false; // wait for the menu to populate
+
+                var hasStable = entries.Any(e => e.Text.Contains("Stable", StringComparison.OrdinalIgnoreCase)
+                                                 && e.Text.Contains("Chocobo", StringComparison.OrdinalIgnoreCase));
+                var hasTend = entries.Any(e => e.Text.Contains("Tend", StringComparison.OrdinalIgnoreCase)
+                                               && e.Text.Contains("my chocobo", StringComparison.OrdinalIgnoreCase));
+
+                if (!hasStable && hasTend)
+                {
+                    // Already stabled but not fetched -> resume at fetch.
+                    Svc.Log.Information("[Chocobo] Chocobo already stabled; resuming at Fetch.");
+                    Advance(StableStep.FetchTend);
+                    return false;
+                }
+
                 if (TrySelectEntry(t => t.Contains("Stable", StringComparison.OrdinalIgnoreCase)
                                         && t.Contains("Chocobo", StringComparison.OrdinalIgnoreCase)))
                 {
