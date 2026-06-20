@@ -96,14 +96,72 @@ public sealed partial class MainWindow
 
     private void DrawSharedFatesMode()
     {
-        ImGui.TextWrapped("Shared FATEs are simply the FATEs in Shadowbringers, Endwalker, and "
-            + "Dawntrail overworld zones. The plugin rotates through these zones automatically.");
+        ImGui.TextWrapped("Shared FATEs are the FATEs in Shadowbringers, Endwalker, and Dawntrail "
+            + "overworld zones. The plugin rotates through these zones and can use the in-game "
+            + "Shared FATE tracker to skip/stop zones once their rank is maxed.");
         ImGui.Spacing();
-        var zones = Data.Zones.SharedFateZones().OrderBy(z => z.Name).ToList();
-        ImGui.TextDisabled($"{zones.Count} shared-fate zones detected.");
-        using var box = ImRaii.Child("##sfzones", new System.Numerics.Vector2(0, 200), true);
-        foreach (var z in zones)
-            ImGui.TextUnformatted(z.Name);
+
+        var skip = C.SharedFateSkipMaxed;
+        if (ImGui.Checkbox("Skip zones whose shared-fate rank is maxed", ref skip)) { C.SharedFateSkipMaxed = skip; Save(); }
+
+        var stopAll = C.StopWhenAllSharedFatesMaxed;
+        if (ImGui.Checkbox("Stop farming when ALL shared-fate zones are maxed", ref stopAll)) { C.StopWhenAllSharedFatesMaxed = stopAll; Save(); }
+
+        ImGui.Separator();
+
+        // Live tracker data.
+        var hasData = Features.SharedFateTracker.HasData();
+        if (!hasData)
+        {
+            ImGui.TextDisabled("Shared FATE tracker data not loaded yet.");
+            if (ImGui.Button("Load tracker data"))
+                Features.SharedFateTracker.EnsureData();
+            ImGui.SameLine();
+            Help("Opens the in-game Shared FATE window briefly to populate rank/progress data. "
+                + "This happens automatically while farming in this mode.");
+
+            ImGui.Spacing();
+            var zones = Data.Zones.SharedFateZones().OrderBy(z => z.Name).ToList();
+            ImGui.TextDisabled($"{zones.Count} shared-fate zones detected (names only):");
+            using var box = ImRaii.Child("##sfzones", new System.Numerics.Vector2(0, 180), true);
+            foreach (var z in zones)
+                ImGui.TextUnformatted(z.Name);
+            return;
+        }
+
+        var data = Features.SharedFateTracker.GetAllZones()
+            .OrderBy(z => z.IsMaxed)
+            .ThenBy(z => z.ZoneName)
+            .ToList();
+        ImGui.TextDisabled($"{data.Count(z => z.IsMaxed)}/{data.Count} zones maxed.");
+
+        using (var tbl = ImRaii.Table("##sftracker", 4, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY,
+                   new System.Numerics.Vector2(0, 320)))
+        {
+            if (tbl)
+            {
+                ImGui.TableSetupColumn("Zone", ImGuiTableColumnFlags.WidthStretch);
+                ImGui.TableSetupColumn("Rank", ImGuiTableColumnFlags.WidthFixed, 70);
+                ImGui.TableSetupColumn("Progress", ImGuiTableColumnFlags.WidthFixed, 90);
+                ImGui.TableSetupColumn("Need", ImGuiTableColumnFlags.WidthFixed, 60);
+                ImGui.TableHeadersRow();
+                foreach (var z in data)
+                {
+                    ImGui.TableNextRow();
+                    ImGui.TableNextColumn();
+                    if (z.IsMaxed)
+                        ECommons.ImGuiMethods.ImGuiEx.Text(new System.Numerics.Vector4(0.4f, 0.9f, 0.4f, 1f), z.ZoneName + " (max)");
+                    else
+                        ImGui.TextUnformatted(z.ZoneName);
+                    ImGui.TableNextColumn();
+                    ImGui.TextUnformatted($"{z.CurrentRank}/{z.MaxRank}");
+                    ImGui.TableNextColumn();
+                    ImGui.TextUnformatted($"{z.FateProgress}%");
+                    ImGui.TableNextColumn();
+                    ImGui.TextUnformatted(z.IsMaxed ? "-" : $"{z.NeededFates}");
+                }
+            }
+        }
     }
 
     private void DrawFixedZoneMode()

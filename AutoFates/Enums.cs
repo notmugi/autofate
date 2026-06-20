@@ -73,5 +73,6 @@ public enum StopReason
     ChocoboMaxed,
     VendorRequirementMet,
     OutOfDarkMatter,
+    AllSharedFatesMaxed,
     Error,
 }

@@ -103,6 +103,11 @@ public sealed unsafe class FarmingController
         ConsumableManager.Tick(C);
         ChocoboManager.Tick(C);
 
+        // In Shared FATEs mode, keep the in-game shared-fate tracker data loaded so zone
+        // skip/stop logic has something to read.
+        if (C.Mode == FarmingMode.SharedFates && (C.SharedFateSkipMaxed || C.StopWhenAllSharedFatesMaxed))
+            Features.SharedFateTracker.EnsureData();
+
         switch (State)
         {
             case FarmState.SelectingZone: TickSelectingZone(); break;
@@ -147,6 +152,21 @@ public sealed unsafe class FarmingController
             return true;
         }
 
+        // All shared-fate zones maxed (only when we have the tracker data to back it up).
+        if (C.Mode == FarmingMode.SharedFates && C.StopWhenAllSharedFatesMaxed
+            && Features.SharedFateTracker.HasData())
+        {
+            var sharedZones = Data.Zones.SharedFateZones().Select(z => z.TerritoryId).ToHashSet();
+            var tracked = Features.SharedFateTracker.GetAllZones()
+                .Where(z => sharedZones.Contains(z.TerritoryId))
+                .ToList();
+            if (tracked.Count > 0 && tracked.All(z => z.IsMaxed))
+            {
+                Stop(StopReason.AllSharedFatesMaxed);
+                return true;
+            }
+        }
+
         // Repair safety: out of dark matter for self-repair.
         if (C.AutoRepair && C.RepairMode == RepairMode.SelfRepair
             && RepairManager.NeedsRepair(C) && !RepairManager.CanSelfRepair())
@@ -174,7 +194,14 @@ public sealed unsafe class FarmingController
             case FarmingMode.Memories:
                 return Data.Zones.ForMode(C.Mode).Select(z => z.TerritoryId).Where(t => t != 0).ToArray();
             case FarmingMode.SharedFates:
-                return Data.Zones.SharedFateZones().Select(z => z.TerritoryId).ToArray();
+            {
+                var all = Data.Zones.SharedFateZones().Select(z => z.TerritoryId);
+                // Drive logic from the in-game Shared FATE tracker: skip zones whose shared-fate
+                // rank is already maxed (only filter when we actually have the agent data).
+                if (C.SharedFateSkipMaxed && Features.SharedFateTracker.HasData())
+                    all = all.Where(t => !Features.SharedFateTracker.IsZoneMaxed(t));
+                return all.ToArray();
+            }
             case FarmingMode.Leveling:
                 // Leveling: stay in current zone if it has fates in our level range, else use shared fates.
                 return new[] { Svc.ClientState.TerritoryType };

@@ -72,6 +72,12 @@ public sealed class Configuration
     // Collect fate tuning
     public int CollectInitialTurnIn = 5;
 
+    // ------------------------------------------------------------------ Shared FATEs
+    /// <summary>In Shared FATEs mode, skip zones whose shared-fate rank is already maxed (read from the in-game tracker).</summary>
+    public bool SharedFateSkipMaxed = true;
+    /// <summary>Stop farming entirely once every shared-fate zone is maxed.</summary>
+    public bool StopWhenAllSharedFatesMaxed = false;
+
     // ------------------------------------------------------------------ Combat backends
     public CombatBackend MovementBackend = CombatBackend.BossModReborn; // movement + AOE
     public CombatBackend RotationBackend = CombatBackend.WrathCombo;    // damage rotation
