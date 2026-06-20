@@ -205,7 +205,11 @@ public static unsafe class ChocoboStableRoutine
                 // "Tend to my Chocobo" opens a submenu; wait for it to actually contain a Train
                 // entry before clicking (avoids racing the menu transition / clicking too early).
                 if (!MenuHasEntry(t => t.Contains("Train", StringComparison.OrdinalIgnoreCase)))
+                {
+                    if (EzThrottler.Throttle("AF_DumpAddons", 2000))
+                        LogVisibleAddons();
                     return false;
+                }
                 if (TrySelectEntry(t => t.Contains("Train", StringComparison.OrdinalIgnoreCase)))
                 {
                     StatusText("Confirming train");
@@ -340,6 +344,25 @@ public static unsafe class ChocoboStableRoutine
     /// <summary>True if a selection menu is open with an entry matching the predicate.</summary>
     private static bool MenuHasEntry(Func<string, bool> match)
         => GetMenuEntries().Any(e => match(e.Text));
+
+    /// <summary>Diagnostic: log every visible addon (name) so we can identify the chocobo menu addon.</summary>
+    private static void LogVisibleAddons()
+    {
+        try
+        {
+            var mgr = FFXIVClientStructs.FFXIV.Client.UI.RaptureAtkUnitManager.Instance();
+            var list = mgr->AtkUnitManager.AllLoadedUnitsList;
+            var names = new List<string>();
+            for (var i = 0; i < list.Count; i++)
+            {
+                var u = list.Entries[i].Value;
+                if (u == null || !u->IsVisible) continue;
+                names.Add(u->NameString);
+            }
+            Svc.Log.Information($"[Chocobo] Visible addons: {string.Join(", ", names)}");
+        }
+        catch (Exception e) { Svc.Log.Warning($"[Chocobo] LogVisibleAddons failed: {e.Message}"); }
+    }
 
     /// <summary>Re-target and re-interact with the stable to reopen its menu. Returns true if interact fired.</summary>
     private static bool ReinteractStable()
