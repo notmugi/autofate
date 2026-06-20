@@ -227,25 +227,47 @@ public static unsafe class ChocoboStableRoutine
 
             case StableStep.Feed:
             {
-                // Feed Thavnairian Onion (raises the level cap past 10) when available, otherwise
-                // a Curiel Root. The feed is performed from the training menu / inventory.
-                if (ChocoboManager.HasThavnairianOnions())
+                // Training opens a "Reward" prompt = the Inventory addon in selection mode. You
+                // reward (feed) by right-clicking the item and choosing "Reward". We automate that:
+                // open the item's context menu against the Inventory addon, then click "Reward".
+                // Prefer Thavnairian Onion (raises the rank cap past 10), else Curiel Root.
+                var feedItem = ChocoboManager.HasThavnairianOnions() ? Data.GameItems.ThavnairianOnion
+                             : ChocoboManager.HasCurielRoots()        ? Data.GameItems.CurielRoot
+                             : 0u;
+                if (feedItem == 0)
                 {
-                    if (EzThrottler.Throttle("AF_FeedOnion", 2000))
-                    {
-                        StatusText("Feeding Thavnairian Onion");
-                        InventoryUtil.UseItem(Data.GameItems.ThavnairianOnion);
-                    }
+                    // Nothing to feed — nothing to reward; just finish.
+                    Advance(StableStep.Done);
+                    return false;
                 }
-                else if (ChocoboManager.HasCurielRoots())
+
+                // 1) If the Reward context menu is open, click "Reward".
+                if (ECommons.GenericHelpers.TryGetAddonByName<AtkBase>("ContextMenu", out var ctx)
+                    && ECommons.GenericHelpers.IsAddonReady(ctx))
                 {
-                    if (EzThrottler.Throttle("AF_FeedCuriel", 2000))
+                    if (!EzThrottler.Throttle("AF_RewardClick", 1500)) return false;
+                    var cm = new AddonMaster.ContextMenu((nint)ctx);
+                    foreach (var e in cm.Entries)
                     {
-                        StatusText("Feeding Curiel Root");
-                        InventoryUtil.UseItem(Data.GameItems.CurielRoot);
+                        if (e.Text.Contains("Reward", StringComparison.OrdinalIgnoreCase))
+                        {
+                            Svc.Log.Debug($"[Chocobo] Context entry '{e.Text}' -> reward {feedItem}.");
+                            e.Select();
+                            Advance(StableStep.Done);
+                            return false;
+                        }
                     }
+                    Svc.Log.Debug($"[Chocobo] Reward not in context menu. Available: {string.Join(" | ", cm.Entries.Select(x => $"'{x.Text}'"))}");
+                    return false;
                 }
-                Advance(StableStep.Done);
+
+                // 2) Otherwise open the feed item's right-click context menu against the Inventory addon.
+                if (!EzThrottler.Throttle("AF_FeedOpen", 1500)) return false;
+                var addonId = GetAddonId("Inventory");
+                if (addonId == 0) addonId = GetAddonId("InventoryLarge");
+                if (addonId == 0) addonId = GetAddonId("InventoryExpansion");
+                StatusText($"Opening reward context for {feedItem}");
+                InventoryUtil.OpenItemContextMenu(feedItem, addonId);
                 return false;
             }
 
@@ -339,6 +361,14 @@ public static unsafe class ChocoboStableRoutine
     /// <summary>True if a selection menu is open with an entry matching the predicate.</summary>
     private static bool MenuHasEntry(Func<string, bool> match)
         => GetMenuEntries().Any(e => match(e.Text));
+
+    /// <summary>Get the addon id of a visible addon by name (0 if not open).</summary>
+    private static uint GetAddonId(string name)
+    {
+        if (ECommons.GenericHelpers.TryGetAddonByName<AtkBase>(name, out var a) && a != null)
+            return a->Id;
+        return 0;
+    }
 
     /// <summary>True if the HousingMyChocobo addon (Train/Feed/...) is open and ready.</summary>
     private static bool HousingChocoboReady()

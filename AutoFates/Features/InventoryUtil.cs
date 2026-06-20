@@ -62,6 +62,50 @@ public static unsafe class InventoryUtil
         }
     }
 
+    private static readonly InventoryType[] PlayerBags =
+        { InventoryType.Inventory1, InventoryType.Inventory2, InventoryType.Inventory3, InventoryType.Inventory4 };
+
+    /// <summary>Find the (container, slot) holding an item, or null if not present.</summary>
+    public static (InventoryType Type, int Slot)? FindItemSlot(uint itemId)
+    {
+        try
+        {
+            var im = InventoryManager.Instance();
+            if (im == null) return null;
+            foreach (var type in PlayerBags)
+            {
+                var container = im->GetInventoryContainer(type);
+                if (container == null || !container->IsLoaded) continue;
+                for (var i = 0; i < container->Size; i++)
+                {
+                    var slot = container->GetInventorySlot(i);
+                    if (slot != null && slot->ItemId == itemId)
+                        return (type, i);
+                }
+            }
+        }
+        catch (Exception e) { Svc.Log.Verbose($"[Inventory] FindItemSlot {itemId} failed: {e.Message}"); }
+        return null;
+    }
+
+    /// <summary>
+    /// Open the right-click context menu for an item in a bag slot. addonId is the parent addon
+    /// (e.g. the Inventory addon shown during the chocobo "Reward" prompt).
+    /// </summary>
+    public static bool OpenItemContextMenu(uint itemId, uint addonId)
+    {
+        var loc = FindItemSlot(itemId);
+        if (loc == null) return false;
+        try
+        {
+            var aic = AgentInventoryContext.Instance();
+            if (aic == null) return false;
+            aic->OpenForItemSlot(loc.Value.Type, loc.Value.Slot, 0, addonId);
+            return true;
+        }
+        catch (Exception e) { Svc.Log.Verbose($"[Inventory] OpenItemContextMenu {itemId} failed: {e.Message}"); return false; }
+    }
+
     /// <summary>Remaining seconds on a status on the local player, or 0 if absent.</summary>
     public static float GetStatusRemaining(uint statusId)
     {
