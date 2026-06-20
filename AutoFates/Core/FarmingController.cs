@@ -3,6 +3,7 @@ using System.Numerics;
 using AutoFates.Features;
 using AutoFates.IPC;
 using Dalamud.Game.ClientState.Fates;
+using Dalamud.Game.ClientState.Objects.Types;
 using ECommons.DalamudServices;
 using ECommons.GameHelpers;
 using ECommons.Throttlers;
@@ -472,13 +473,25 @@ public sealed unsafe class FarmingController
 
     private void EnsureCombatEngaged(IFate fate)
     {
+        var me = Player.Object;
+        if (me == null) return;
+
+        // STICKY TARGET: if our target is anything other than a valid fate ENEMY (a friendly NPC,
+        // a dead mob, nothing, or something yanked our target away), snap it back onto a real fate
+        // enemy IMMEDIATELY — unthrottled and before the BMR yield/return logic — provided a live
+        // enemy actually exists. This fixes locking onto friendly NPCs (escort/guard) when the
+        // enemy count drops, and keeps the rotation from idling on a lost target mid-fight.
+        var isDefendNow = FateSelector.Classify(fate) == FateType.Defend;
+        var cur = Svc.Targets.Target as IBattleNpc;
+        var targetIsValidEnemy = cur != null && !cur.IsDead && cur.CurrentHp > 0
+                                 && FateTargeting.IsFateEnemy(cur, _targetFateId);
+        if (!targetIsValidEnemy && FateTargeting.CountFateEnemies(_targetFateId) > 0)
+            FateTargeting.EnsureFateTarget(_targetFateId, defendPriority: isDefendNow);
+
         // CRITICAL: every backend (including BMR AI) needs a TARGET to fight — none of them will
         // go hunt fate mobs on their own. We pick the nearest live mob belonging to THIS fate
         // (matched by GameObject.FateId) and feed it to the combat backend.
         if (!EzThrottler.Throttle("AF_AcquireTarget", 300)) return;
-
-        var me = Player.Object;
-        if (me == null) return;
 
         // SMART MIX (BMR movement backend): vnavmesh walks us to the enemy, BMR handles AOE
         // avoidance. To stop vnav and BMR fighting for control (walk out of AOE -> walk back in ->
