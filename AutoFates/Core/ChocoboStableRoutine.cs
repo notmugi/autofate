@@ -138,7 +138,7 @@ public static unsafe class ChocoboStableRoutine
                 if (stable == null)
                 {
                     if (EzThrottler.Throttle("AF_FindStable", 5000))
-                        Svc.Chat.PrintError("[AutoFates] Couldn't find a chocobo stable nearby. Set the stable position in the Chocobo tab.");
+                        Svc.Chat.PrintError("[AutoFates] Couldn't find the chocobo stable nearby. Target your stable in-game and click 'Add targeted stable' in the Chocobo tab.");
                     return false;
                 }
                 if (Player.IsAnimationLocked || !Player.Interactable) return false;
@@ -230,16 +230,29 @@ public static unsafe class ChocoboStableRoutine
     /// <summary>Find the nearest chocobo stable EventObj (housing furnishing) within ~10y.</summary>
     private static IGameObject? FindStable()
     {
-        IGameObject? best = null;
-        var bestDist = float.MaxValue;
         var me = Player.Object;
         if (me == null) return null;
+        var c = Plugin.C;
+
+        IGameObject? best = null;
+        var bestDist = float.MaxValue;
         foreach (var o in Svc.Objects)
         {
-            // Stables are EventObj furnishings; match by name to be safe.
-            if (o.ObjectKind != Dalamud.Game.ClientState.Objects.Enums.ObjectKind.EventObj) continue;
-            var name = o.Name.TextValue;
-            if (string.IsNullOrEmpty(name) || !name.Contains("Stable", StringComparison.OrdinalIgnoreCase)) continue;
+            bool match;
+            if (c != null && c.StableDataId != 0)
+            {
+                // Preferred: the exact entity the user targeted + added (by DataId).
+                match = o.DataId == c.StableDataId;
+            }
+            else
+            {
+                // Fallback: an EventObj whose name contains "Stable".
+                if (o.ObjectKind != Dalamud.Game.ClientState.Objects.Enums.ObjectKind.EventObj) continue;
+                var name = o.Name.TextValue;
+                match = !string.IsNullOrEmpty(name) && name.Contains("Stable", StringComparison.OrdinalIgnoreCase);
+            }
+            if (!match) continue;
+
             var d = System.Numerics.Vector3.Distance(me.Position, o.Position);
             if (d < bestDist) { bestDist = d; best = o; }
         }

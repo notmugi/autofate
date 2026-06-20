@@ -113,7 +113,11 @@ public sealed unsafe class FarmingController
 
         // Always-on maintenance that can run in parallel with farming.
         ConsumableManager.Tick(C);
-        ChocoboManager.Tick(C);
+        // Skip companion maintenance while stabling: the stable routine WITHDRAWS the chocobo, and
+        // auto-summon would immediately try to re-summon it (-> "unable to summon companion here"
+        // in housing) and fight our own Withdraw.
+        if (State != FarmState.ChocoboLeveling)
+            ChocoboManager.Tick(C);
 
         // In Shared FATEs mode, keep the in-game shared-fate tracker data loaded so zone
         // skip/stop logic has something to read.

@@ -63,22 +63,51 @@ public sealed partial class MainWindow
             if (ImGui.Checkbox("Auto-clean stable with Magicked Stable Brooms", ref clean)) { C.AutoCleanStable = clean; Save(); }
 
             ImGui.Spacing();
-            if (ImGui.Button("Set stable position to current spot"))
+            ImGui.TextWrapped("Target your chocobo stable in-game, then click below to capture the exact "
+                + "stable entity (most reliable). This also records the spot to navigate to.");
+            if (ImGui.Button("Add targeted stable"))
+            {
+                var tgt = Svc.Targets.Target;
+                if (tgt == null)
+                {
+                    Svc.Chat.PrintError("[AutoFates] No target. Click your chocobo stable first, then press this.");
+                }
+                else
+                {
+                    C.StableDataId = tgt.DataId;
+                    C.StableName = tgt.Name.TextValue;
+                    C.StablePosition = tgt.Position;
+                    C.StableTerritory = Svc.ClientState.TerritoryType;
+                    C.StablePositionSet = true;
+                    Save();
+                    Svc.Chat.Print($"[AutoFates] Stable added: '{C.StableName}' (DataId {C.StableDataId}).");
+                }
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Set to current spot (no entity)"))
             {
                 var me = ECommons.GameHelpers.Player.Object;
                 if (me != null)
                 {
                     C.StablePosition = me.Position;
                     C.StableTerritory = Svc.ClientState.TerritoryType;
+                    C.StableDataId = 0;
+                    C.StableName = string.Empty;
                     C.StablePositionSet = true;
                     Save();
                 }
             }
-            ImGui.SameLine();
+
             if (C.StablePositionSet)
-                ImGui.TextDisabled($"Set in {Data.Zones.GetTerritoryName(C.StableTerritory)} ({C.StablePosition.X:0},{C.StablePosition.Z:0})");
+            {
+                if (C.StableDataId != 0)
+                    ImGui.TextDisabled($"Stable: '{C.StableName}' (DataId {C.StableDataId}) in {Data.Zones.GetTerritoryName(C.StableTerritory)} ({C.StablePosition.X:0},{C.StablePosition.Z:0})");
+                else
+                    ImGui.TextDisabled($"Position only in {Data.Zones.GetTerritoryName(C.StableTerritory)} ({C.StablePosition.X:0},{C.StablePosition.Z:0}) — no entity captured");
+                if (ImGui.SmallButton("Clear stable")) { C.StablePositionSet = false; C.StableDataId = 0; C.StableName = string.Empty; Save(); }
+            }
             else
-                ImGui.TextDisabled("not set");
+                ImGui.TextDisabled("Stable not set");
 
             ImGui.TextDisabled($"Curiel Roots x{Features.InventoryUtil.GetItemCount(Data.GameItems.CurielRoot)}, "
                 + $"Thavnairian Onions x{Features.InventoryUtil.GetItemCount(Data.GameItems.ThavnairianOnion)}, "

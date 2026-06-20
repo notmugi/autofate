@@ -134,6 +134,11 @@ public sealed class Configuration
     public System.Numerics.Vector3 StablePosition;
     public uint StableTerritory;
     public bool StablePositionSet = false;
+    /// <summary>DataId of the stable entity the user targeted + added (0 = not captured). Lets us
+    /// find the exact stable object by type rather than guessing by name.</summary>
+    public uint StableDataId;
+    /// <summary>Display name of the captured stable entity (for the UI).</summary>
+    public string StableName = string.Empty;
     public bool AutoCleanStable = true;
 
     // ------------------------------------------------------------------ Consumables
