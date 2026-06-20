@@ -482,8 +482,13 @@ public static unsafe class ChocoboStableRoutine
 
     private static bool AtHome(Configuration c)
     {
-        // Heuristic: we're "home" if we're in a housing/apartment territory.
-        // Housing intended-use ids: 13/14 (private/FC), 60/61 (apartments), 22 etc.
+        // Most reliable: we're "home" if we're already in the territory where the user captured
+        // their stable. This avoids guessing housing TerritoryIntendedUse ids (which caused the
+        // teleport loop when the real id wasn't in our list).
+        if (c.StablePositionSet && c.StableTerritory != 0)
+            return Svc.ClientState.TerritoryType == c.StableTerritory;
+
+        // Fallback (no stable captured yet): treat housing/apartment territories as home.
         var terr = Player.Territory.ValueNullable;
         if (terr == null) return false;
         var use = terr.Value.TerritoryIntendedUse.RowId;
