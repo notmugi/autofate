@@ -206,8 +206,10 @@ public static unsafe class ChocoboStableRoutine
 
                 if (!hasStable && hasTend)
                 {
-                    // Already stabled but not fetched -> resume at fetch.
+                    // Already stabled but not fetched -> resume at fetch. Stamp the cooldown so we
+                    // don't immediately try to re-stable right after fetching back out.
                     Svc.Log.Information("[Chocobo] Chocobo already stabled; resuming at Fetch.");
+                    _lastStableUtc = DateTime.UtcNow;
                     Advance(StableStep.FetchTend);
                     return false;
                 }
