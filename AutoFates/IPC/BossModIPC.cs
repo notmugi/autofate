@@ -100,6 +100,15 @@ public static class BossModIPC
         return ForbiddenZonesCount() > 0 && ForbiddenZonesNextActivation() < 3f;
     }
 
+    /// <summary>
+    /// Raw "danger present" signal for the yield latch: BMR is actively repositioning us, OR there
+    /// is ANY active forbidden zone (regardless of how soon it fires). This is intentionally
+    /// broader than <see cref="ShouldYieldForDodge"/> so we don't path back into a zone that is
+    /// still active just because its activation timer is &gt; 3s away.
+    /// </summary>
+    public static bool DangerPresent()
+        => AiIsNavigating() || ForbiddenZonesCount() > 0;
+
     /// <summary>Follow a party member by slot (0-based). Used for follow-party-leader mode.</summary>
     public static void AiFollow(int slot) => Chat.ExecuteCommand($"/bmrai follow Slot{slot + 1}");
 

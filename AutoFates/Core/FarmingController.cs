@@ -36,6 +36,11 @@ public sealed unsafe class FarmingController
     private int _collectTurnedIn;
     private int _collectEstimatedNeeded;
 
+    // Smart-mix yield latch: when BMR takes over for a dodge we keep yielding until danger has
+    // been fully clear for this settle window, so vnav and BMR don't fight for control.
+    private long _yieldUntilMs;
+    private const long YieldSettleMs = 600;
+
     // ---------------------------------------------------------------- lifecycle
     public void Start()
     {
@@ -441,14 +446,35 @@ public sealed unsafe class FarmingController
         if (me == null) return;
 
         // SMART MIX (BMR movement backend): vnavmesh walks us to the enemy, BMR handles AOE
-        // avoidance. When BMR signals an imminent dodge, we hand movement to BMR; otherwise we
-        // path toward the target ourselves. This fixes BMR's AI not approaching fate mobs on its
-        // own while still getting BMR's dodging.
-        if (BmrMovementActive() && IPCManager.YieldMovementForDodge())
+        // avoidance. To stop vnav and BMR fighting for control (walk out of AOE -> walk back in ->
+        // walk out again), we use a latch with hysteresis:
+        //   - Enter yield as soon as a dodge is imminent (ShouldYieldForDodge).
+        //   - STAY yielded while ANY danger is present (DangerPresent), and for a short settle
+        //     window after danger fully clears, before vnav is allowed to resume pathing.
+        if (BmrMovementActive())
         {
-            // Danger imminent — stop our pathing and let BMR reposition us out of the AOE.
-            Navigator.Stop();
-            return;
+            var now = Environment.TickCount64;
+            if (IPCManager.YieldMovementForDodge())
+            {
+                // Imminent danger — hand movement to BMR and (re)arm the settle timer.
+                _yieldUntilMs = now + YieldSettleMs;
+                Navigator.Stop();
+                return;
+            }
+            if (IPCManager.DangerPresent())
+            {
+                // Danger still active (zone hasn't expired) — keep yielding, keep timer armed.
+                _yieldUntilMs = now + YieldSettleMs;
+                Navigator.Stop();
+                return;
+            }
+            if (now < _yieldUntilMs)
+            {
+                // Danger just cleared; wait out the settle window so we don't immediately path
+                // back into a zone that BMR only just pulled us out of.
+                Navigator.Stop();
+                return;
+            }
         }
 
         var target = FateTargeting.EnsureFateTarget(_targetFateId);
@@ -520,6 +546,7 @@ public sealed unsafe class FarmingController
     {
         Stats.OnFateCompleted();
         Navigator.Stop();
+        _yieldUntilMs = 0; // clear the smart-mix yield latch
 
         // Per-zone counters (manual mode quota).
         var terr = Svc.ClientState.TerritoryType;

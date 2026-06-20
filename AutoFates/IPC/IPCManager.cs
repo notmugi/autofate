@@ -120,4 +120,8 @@ public static class IPCManager
     /// </summary>
     public static bool YieldMovementForDodge()
         => BossModIPC.IsInstalled && BossModIPC.ShouldYieldForDodge();
+
+    /// <summary>True while any BMR danger is present (active forbidden zone or AI navigating).</summary>
+    public static bool DangerPresent()
+        => BossModIPC.IsInstalled && BossModIPC.DangerPresent();
 }
