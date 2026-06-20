@@ -16,9 +16,9 @@
     "CategoryTags": [ "utility" ],
     "IsHide": false,
     "IsTestingExclusive": false,
-    "DownloadLinkInstall": "https://github.com/notmugi/autofate/releases/latest/download/latest.zip",
-    "DownloadLinkTesting": "https://github.com/notmugi/autofate/releases/latest/download/latest.zip",
-    "DownloadLinkUpdate": "https://github.com/notmugi/autofate/releases/latest/download/latest.zip",
+    "DownloadLinkInstall": "https://raw.githubusercontent.com/notmugi/autofate/main/latest.zip",
+    "DownloadLinkTesting": "https://raw.githubusercontent.com/notmugi/autofate/main/latest.zip",
+    "DownloadLinkUpdate": "https://raw.githubusercontent.com/notmugi/autofate/main/latest.zip",
     "DownloadCount": 0
   }
 ]
