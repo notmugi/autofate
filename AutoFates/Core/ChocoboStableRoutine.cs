@@ -202,15 +202,10 @@ public static unsafe class ChocoboStableRoutine
 
             case StableStep.ChooseTrain:
             {
-                // "Tend to my Chocobo" opens a submenu; wait for it to actually contain a Train
-                // entry before clicking (avoids racing the menu transition / clicking too early).
-                if (!MenuHasEntry(t => t.Contains("Train", StringComparison.OrdinalIgnoreCase)))
-                {
-                    if (EzThrottler.Throttle("AF_DumpAddons", 2000))
-                        LogVisibleAddons();
-                    return false;
-                }
-                if (TrySelectEntry(t => t.Contains("Train", StringComparison.OrdinalIgnoreCase)))
+                // "Tend to my Chocobo" opens the custom HousingMyChocobo addon (a fixed list:
+                // 0=Train, 1=Feed, 2=Change Name, 3=Fetch, 4=View Details, 5=Quit). Fire Train (0).
+                if (!HousingChocoboReady()) return false;
+                if (FireHousingChocobo(0)) // Train
                 {
                     StatusText("Confirming train");
                     Advance(StableStep.ConfirmTrain);
@@ -344,6 +339,28 @@ public static unsafe class ChocoboStableRoutine
     /// <summary>True if a selection menu is open with an entry matching the predicate.</summary>
     private static bool MenuHasEntry(Func<string, bool> match)
         => GetMenuEntries().Any(e => match(e.Text));
+
+    /// <summary>True if the HousingMyChocobo addon (Train/Feed/...) is open and ready.</summary>
+    private static bool HousingChocoboReady()
+        => ECommons.GenericHelpers.TryGetAddonByName<AtkBase>("HousingMyChocobo", out var a)
+           && ECommons.GenericHelpers.IsAddonReady(a);
+
+    /// <summary>
+    /// Fire a callback on the HousingMyChocobo addon to pick a list row.
+    /// Rows: 0=Train, 1=Feed, 2=Change Name, 3=Fetch, 4=View Details, 5=Quit.
+    /// </summary>
+    private static bool FireHousingChocobo(int row)
+    {
+        if (!HousingChocoboReady()) return false;
+        if (!EzThrottler.Throttle("AF_HousingChocobo", 2000)) return false;
+        if (ECommons.GenericHelpers.TryGetAddonByName<AtkBase>("HousingMyChocobo", out var addon))
+        {
+            Svc.Log.Debug($"[Chocobo] HousingMyChocobo callback row {row}.");
+            Callback.Fire(addon, true, row);
+            return true;
+        }
+        return false;
+    }
 
     /// <summary>Diagnostic: log every visible addon (name) so we can identify the chocobo menu addon.</summary>
     private static void LogVisibleAddons()
