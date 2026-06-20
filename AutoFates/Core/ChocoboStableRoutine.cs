@@ -269,34 +269,39 @@ public static unsafe class ChocoboStableRoutine
                     return false;
                 }
 
-                // 1) If the Reward context menu is open, click "Reward".
+                // 1) If the Reward context menu is open, click "Reward". Detect by existence+visible
+                // (NOT IsAddonReady — that returns false during the open animation, which made step 2
+                // re-fire OpenForItemSlot and toggle the menu shut => the flashing loop).
                 if (ECommons.GenericHelpers.TryGetAddonByName<AtkBase>("ContextMenu", out var ctx)
-                    && ECommons.GenericHelpers.IsAddonReady(ctx))
+                    && ctx != null && ctx->IsVisible)
                 {
-                    if (!EzThrottler.Throttle("AF_RewardClick", 1500)) return false;
+                    if (!EzThrottler.Throttle("AF_RewardClick", 500)) return false;
                     var cm = new AddonMaster.ContextMenu((nint)ctx);
-                    foreach (var e in cm.Entries)
+                    var entries = cm.Entries;
+                    if (entries.Length == 0) return false; // not populated yet; wait
+                    foreach (var e in entries)
                     {
                         if (e.Text.Contains("Reward", StringComparison.OrdinalIgnoreCase))
                         {
-                            Svc.Log.Debug($"[Chocobo] Context entry '{e.Text}' -> reward {feedItem}.");
+                            Svc.Log.Information($"[Chocobo] Context entry '{e.Text}' -> reward {feedItem}.");
                             e.Select();
                             Advance(StableStep.Done);
                             return false;
                         }
                     }
-                    Svc.Log.Debug($"[Chocobo] Reward not in context menu. Available: {string.Join(" | ", cm.Entries.Select(x => $"'{x.Text}'"))}");
+                    Svc.Log.Information($"[Chocobo] Reward not in context menu. Available: {string.Join(" | ", entries.Select(x => $"'{x.Text}'"))}");
                     return false;
                 }
 
-                // 2) Otherwise open the feed item's right-click context menu against the Inventory addon.
-                if (!EzThrottler.Throttle("AF_FeedOpen", 2500)) return false;
-                LogVisibleAddons(); // diagnostic: see what addons are open (incl. the real context-menu name)
-                var addonId = GetAddonId("Inventory");
+                // 2) Otherwise open the feed item's right-click context menu. Use a longer throttle
+                // so we don't re-fire while the menu is opening.
+                if (!EzThrottler.Throttle("AF_FeedOpen", 3000)) return false;
+                var addonId = GetAddonId("InventoryExpansion");
+                if (addonId == 0) addonId = GetAddonId("Inventory");
                 if (addonId == 0) addonId = GetAddonId("InventoryLarge");
-                if (addonId == 0) addonId = GetAddonId("InventoryExpansion");
+                var slot = InventoryUtil.FindItemSlot(feedItem);
                 StatusText($"Opening reward context for {feedItem}");
-                Svc.Log.Information($"[Chocobo] Opening context menu for item {feedItem} (slot {InventoryUtil.FindItemSlot(feedItem)?.Slot}, addonId {addonId}).");
+                Svc.Log.Information($"[Chocobo] Opening context menu for item {feedItem} (slot {slot?.Slot}, container {slot?.Type}, addonId {addonId}).");
                 InventoryUtil.OpenItemContextMenu(feedItem, addonId);
                 return false;
             }
