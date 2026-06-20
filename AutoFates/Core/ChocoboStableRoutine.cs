@@ -79,19 +79,36 @@ public static unsafe class ChocoboStableRoutine
         if (ChocoboManager.ReachedTargetLevel(c))
             return true;
 
-        // Step 1: get home.
-        if (!AtHome(c))
+        // If the stable entity is already loaded nearby, we're home — NEVER teleport. Go straight
+        // to stabling. This is the bulletproof check (no territory/intended-use guessing).
+        var stableObj = FindStable();
+        var stableNearby = stableObj != null;
+
+        if (!stableNearby)
         {
-            if (EzThrottler.Throttle("AF_GoHome", 8000))
-                Teleporter.LifestreamCommand(c.ChocoboHomeLifestreamCommand);
-            return false;
+            // Step 1: get home (only if we genuinely can't see the stable).
+            if (!AtHome(c))
+            {
+                if (EzThrottler.Throttle("AF_GoHome", 8000))
+                    Teleporter.LifestreamCommand(c.ChocoboHomeLifestreamCommand);
+                return false;
+            }
+
+            // Step 2: navigate toward the captured stable position to make the stable load in.
+            if (c.StablePositionSet && c.StableTerritory == Svc.ClientState.TerritoryType)
+            {
+                var arrived = Navigator.MoveTo(c, c.StablePosition, 3f);
+                if (!arrived) return false;
+            }
+            return false; // re-check for the stable entity next tick
         }
 
-        // Step 2: navigate to the stable position if the user set one.
-        if (c.StablePositionSet && c.StableTerritory == Svc.ClientState.TerritoryType)
+        // Step 2b: walk into interaction range of the stable if we're too far.
+        if (stableObj != null && Player.Object != null
+            && System.Numerics.Vector3.Distance(Player.Object.Position, stableObj.Position) > 4f)
         {
-            var arrived = Navigator.MoveTo(c, c.StablePosition, 3f);
-            if (!arrived) return false;
+            Navigator.MoveTo(c, stableObj.Position, 3f);
+            return false;
         }
 
         // Step 3: clean the stable if we have brooms.
