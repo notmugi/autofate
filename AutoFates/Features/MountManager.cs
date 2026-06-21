@@ -20,7 +20,28 @@ public static unsafe class MountManager
 
     public static bool IsMounted => Player.Mounted;
 
-    public static bool CanMountHere => Player.CanMount;
+    // HARD RULE: never mount in a housing district, even though the game allows it.
+    public static bool CanMountHere => Player.CanMount && !InHousingDistrict;
+
+    /// <summary>
+    /// True if we're in a housing district (residential ward, plot/instance, or apartment).
+    /// Housing TerritoryIntendedUse: 13 = residential ward, 14 = housing instance (private/FC
+    /// plot), 60 = apartment building.
+    /// </summary>
+    public static bool InHousingDistrict
+    {
+        get
+        {
+            try
+            {
+                var terr = Svc.Data.GetExcelSheet<TerritoryType>()?.GetRowOrDefault(Svc.ClientState.TerritoryType);
+                if (terr is not { } row) return false;
+                var use = row.TerritoryIntendedUse.RowId;
+                return use is 13 or 14 or 60;
+            }
+            catch { return false; }
+        }
+    }
 
     public static bool CanFlyHere => Player.CanFly;
 

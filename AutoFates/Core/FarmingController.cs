@@ -654,9 +654,17 @@ public sealed unsafe class FarmingController
                 var pull = FateTargeting.GetNearestUngatheredEnemy(_targetFateId, gatherRange);
                 if (pull != null)
                 {
-                    // Target it (so the backend tags it) and walk onto it to pull it in.
-                    if (Svc.Targets.Target is not IBattleNpc c2 || c2.GameObjectId != pull.GameObjectId)
+                    // IMPORTANT for casters/ranged: do NOT yank the target while we're mid-cast —
+                    // changing target cancels the cast. Only (re)target the pull mob when we're not
+                    // casting AND our current target isn't already a valid fate enemy. This lets the
+                    // rotation land casts on whatever it's on while we walk the pile together.
+                    var meCasting = Player.Object is { IsCasting: true };
+                    var curValid = Svc.Targets.Target is IBattleNpc cc && FateTargeting.IsAttackableEnemy(cc);
+                    if (!meCasting && !curValid)
                         Svc.Targets.Target = pull;
+
+                    // Walk toward the pull mob to body-aggro it, but don't stop the rotation: just
+                    // keep moving. (vnav move + backend cast happen in parallel.)
                     if (Vector3.Distance(me.Position, pull.Position) > 1.5f)
                         Navigator.MoveTo(C, pull.Position, 1.2f, allowMount: false);
                     else
