@@ -20,10 +20,9 @@ namespace AutoFates.Core;
 /// sequence the multi-step interactions.
 ///
 /// Stable loop (when ChocoboLevelingEnabled):
-///   - When the chocobo has reached max companion XP for its rank (needs stabling to advance),
-///     OR enough time has passed since last stabling, travel home, recall the chocobo, open the
-///     stable, stable + train it, feed Thavnairian Onions (rank > 10) / Curiel Roots.
-///   - Stabling sets a ~1h timer; we return after it elapses to feed Curiel Roots and resume.
+///   - While we have Thavnairian Onions and the chocobo is under the target level, travel home,
+///     recall the chocobo, open the stable, stable + train it, and feed a Thavnairian Onion.
+///   - We do NOT track any cooldown and do NOT use XP food (Curiel Roots) — only onions matter.
 ///   - Stop once the chocobo reaches the configured max level (or 20).
 ///
 /// NOTE: The precise stable addon interactions (right-click stable, menu selection) are flagged
@@ -37,23 +36,6 @@ public static unsafe class ChocoboStableRoutine
         ShowError = false,
     });
 
-    // Tracks the last time we stabled, to respect the ~1 hour cooldown. Persisted to config so it
-    // survives plugin reloads (otherwise we'd immediately re-stable after a fetch).
-    private static DateTime _lastStableUtc
-    {
-        get => Plugin.C is { LastStableUnixMs: > 0 } c
-            ? DateTimeOffset.FromUnixTimeMilliseconds(c.LastStableUnixMs).UtcDateTime
-            : DateTime.MinValue;
-        set
-        {
-            if (Plugin.C is { } c)
-            {
-                c.LastStableUnixMs = new DateTimeOffset(value, TimeSpan.Zero).ToUnixTimeMilliseconds();
-                c.Save();
-            }
-        }
-    }
-    private static readonly TimeSpan StableCooldown = TimeSpan.FromMinutes(60);
 
     /// <summary>Does the chocobo need stabling/feeding attention right now?</summary>
     public static bool NeedsAttention(Configuration c)
@@ -62,14 +44,12 @@ public static unsafe class ChocoboStableRoutine
         if (ChocoboManager.ReachedTargetLevel(c)) return false; // done
 
         // Stabling REQUIRES Thavnairian Onions (they raise the rank cap). No onions -> skip the
-        // whole chocobo-leveling loop entirely; don't interrupt farming.
+        // whole chocobo-leveling loop entirely; don't interrupt farming. We do NOT track any
+        // cooldown or use XP food (Curiel Roots) — only onions matter.
         var onions = ChocoboManager.HasThavnairianOnions();
-        var onionCount = InventoryUtil.GetItemCount(Data.GameItems.ThavnairianOnion);
-        var cooldownLeft = StableCooldown - (DateTime.UtcNow - _lastStableUtc);
-        var cooldownElapsed = cooldownLeft <= TimeSpan.Zero;
 
         if (EzThrottler.Throttle("AF_ChocoDiag", 10_000))
-            Svc.Log.Information($"[Chocobo] NeedsAttention: onions={onionCount} rank={ChocoboManager.Rank()} target={c.ChocoboTargetLevel} cooldownLeft={(cooldownElapsed ? 0 : cooldownLeft.TotalMinutes):0.0}m");
+            Svc.Log.Information($"[Chocobo] NeedsAttention: onions={InventoryUtil.GetItemCount(Data.GameItems.ThavnairianOnion)} rank={ChocoboManager.Rank()} target={c.ChocoboTargetLevel}");
 
         if (!onions)
         {
@@ -78,11 +58,7 @@ public static unsafe class ChocoboStableRoutine
             return false;
         }
 
-        // Respect the ~1h stable cooldown (can't stable again until it elapses).
-        if (!cooldownElapsed) return false;
-
-        // We have onions, we're under target level, and the cooldown is up -> stable now.
-        // (Chocobo leveling is top priority; we don't gate on a fragile CurrentXP heuristic.)
+        // We have onions and we're under target level -> stable now.
         return true;
     }
 
@@ -220,10 +196,8 @@ public static unsafe class ChocoboStableRoutine
 
                 if (!hasStable && hasTend)
                 {
-                    // Already stabled but not fetched -> resume at fetch. Stamp the cooldown so we
-                    // don't immediately try to re-stable right after fetching back out.
+                    // Already stabled but not fetched -> resume at fetch.
                     Svc.Log.Information("[Chocobo] Chocobo already stabled; resuming at Fetch.");
-                    _lastStableUtc = DateTime.UtcNow;
                     Advance(StableStep.FetchTend);
                     return false;
                 }
@@ -284,7 +258,6 @@ public static unsafe class ChocoboStableRoutine
                 if (TryConfirmYesno())
                 {
                     StatusText("Trained; feeding");
-                    _lastStableUtc = DateTime.UtcNow; // training sets the ~1h cooldown
                     Advance(StableStep.Feed);
                 }
                 return false;
@@ -366,7 +339,6 @@ public static unsafe class ChocoboStableRoutine
                 if (TryConfirmYesno())
                 {
                     StatusText("Fetched; resuming farming");
-                    _lastStableUtc = DateTime.UtcNow; // ensure cooldown is stamped so we don't re-stable
                     Advance(StableStep.Done);
                     return false;
                 }

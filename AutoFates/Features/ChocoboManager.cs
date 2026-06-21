@@ -178,7 +178,6 @@ public static unsafe class ChocoboManager
     public static bool ReachedTargetLevel(Configuration c)
         => Rank() >= Math.Min(20, Math.Max(1, c.ChocoboTargetLevel));
 
-    public static bool HasCurielRoots() => InventoryUtil.GetItemCount(Data.GameItems.CurielRoot) > 0;
     public static bool HasThavnairianOnions() => InventoryUtil.GetItemCount(Data.GameItems.ThavnairianOnion) > 0;
     public static bool HasStableBrooms() => InventoryUtil.GetItemCount(Data.GameItems.MagickedStableBroom) > 0;
 }
