@@ -137,27 +137,6 @@ public static unsafe class MountManager
 
     public static bool IsFlying => Svc.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.InFlight];
 
-    /// <summary>Jump (General Action 2). Used by the unstuck routine to hop over small geometry.</summary>
-    public static void Jump()
-    {
-        if (Player.IsJumping) return;
-        if (!EzThrottler.Throttle("AF_Jump", 500)) return;
-        try { ActionManager.Instance()->UseAction(ActionType.GeneralAction, 2 /* Jump */); }
-        catch (Exception e) { Svc.Log.Verbose($"[Mount] Jump failed: {e.Message}"); }
-    }
-
-    /// <summary>
-    /// Gain altitude while flying. Repeatedly firing Jump (General Action 2) while airborne makes
-    /// the mount ascend — used by the unstuck routine to rise above an obstacle before resuming.
-    /// </summary>
-    public static void Ascend()
-    {
-        if (!IsFlying) return;
-        if (!EzThrottler.Throttle("AF_Ascend", 200)) return;
-        try { ActionManager.Instance()->UseAction(ActionType.GeneralAction, 2 /* Jump = ascend while flying */); }
-        catch (Exception e) { Svc.Log.Verbose($"[Mount] Ascend failed: {e.Message}"); }
-    }
-
     /// <summary>Dismount via the Mount Roulette / mount general action toggle (id 9 toggles off when mounted).</summary>
     public static bool Dismount()
     {
