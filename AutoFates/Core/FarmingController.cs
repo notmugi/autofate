@@ -190,6 +190,7 @@ public sealed unsafe class FarmingController
         // (Still allow combat/collect handling once we're physically inside a fate.)
         if (C.FollowPartyLeader
             && State is not (FarmState.InFate or FarmState.CollectTurnIn or FarmState.ClearingAggro
+                             or FarmState.TravelingToFate
                              or FarmState.Maintenance or FarmState.ChocoboLeveling or FarmState.GemstoneShopping))
         {
             TickFollowLeader();
