@@ -31,12 +31,19 @@ public static unsafe class GemstoneShopper
     /// Close the currency shop window — equivalent to pressing Escape. Calls the addon's Close()
     /// (fire-callback + hide), which is exactly what the Escape key triggers for this addon.
     /// </summary>
-    public static void CloseShop()
+    /// <summary>
+    /// Close the gemstone (ShopExchangeCurrency) window. Mirrors GatherBuddy Reborn's
+    /// VendorInteractionHelper.TryCloseShopExchangeCurrency: call AtkUnitBase.Close(true).
+    /// Returns true once the window is no longer visible (caller should retry until then).
+    /// </summary>
+    public static bool CloseShop()
     {
-        // Literally press Escape, exactly like a player would — same method that reliably closes
-        // the Repair window and other addons in this plugin.
-        try { ECommons.Automation.WindowsKeypress.SendKeypress(ECommons.Interop.LimitedKeys.Escape); }
-        catch (Exception e) { Svc.Log.Verbose($"[Gemstone] CloseShop (Escape) failed: {e.Message}"); }
+        if (!ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>(ShopAddon, out var addon)
+            || addon == null || !addon->IsVisible)
+            return true; // already closed
+        try { addon->Close(true); }
+        catch (Exception e) { Svc.Log.Verbose($"[Gemstone] CloseShop failed: {e.Message}"); }
+        return false; // not confirmed closed yet
     }
 
     /// <summary>True if every enabled buy-list entry has met its target quantity.</summary>

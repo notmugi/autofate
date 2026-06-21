@@ -1109,10 +1109,14 @@ public sealed unsafe class FarmingController
         {
             if (GemstoneShopper.PurchaseTick(C))
             {
-                // Done buying — close the shop window (same as hitting Escape) before resuming.
-                if (EzThrottler.Throttle("AF_CloseShop", 500))
-                    GemstoneShopper.CloseShop();
-                State = FarmState.SelectingZone;
+                // Done buying — close the shop window, retrying until it's actually gone (GBR does
+                // the same: a single Close() call can be missed mid-frame). Only leave the state
+                // once CloseShop confirms the addon is no longer visible.
+                if (EzThrottler.Throttle("AF_CloseShop", 300))
+                {
+                    if (GemstoneShopper.CloseShop())
+                        State = FarmState.SelectingZone;
+                }
             }
             return;
         }

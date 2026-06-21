@@ -69,14 +69,33 @@ public static unsafe class RepairManager
         => Svc.GameGui.GetAddonByName("Repair", 1) != nint.Zero;
 
     /// <summary>Close the Repair window (equivalent to pressing Escape) once repairs are done.</summary>
-    public static void CloseRepairWindow()
+    /// <summary>
+    /// Close the Repair window. Mirrors GatherBuddy Reborn's TaskCloseRepairWindow: fire the
+    /// addon's cancel callback (-1). Returns true once the window is gone (caller retries until
+    /// then). Tracks attempts and falls back to hiding the agent directly if Close keeps failing.
+    /// </summary>
+    private static int _repairCloseAttempts;
+    public static bool CloseRepairWindow()
     {
-        // Literally press Escape, exactly like a player would, to close the Repair window.
-        try
+        if (!ECommons.GenericHelpers.TryGetAddonByName<AtkUnitBase>("Repair", out var addon)
+            || addon == null || !addon->IsVisible)
         {
-            ECommons.Automation.WindowsKeypress.SendKeypress(ECommons.Interop.LimitedKeys.Escape);
+            _repairCloseAttempts = 0;
+            return true; // already closed
         }
-        catch (Exception e) { Svc.Log.Verbose($"[Repair] CloseRepairWindow (Escape) failed: {e.Message}"); }
+
+        _repairCloseAttempts++;
+        if (_repairCloseAttempts > 20)
+        {
+            // Fallback: hide the Repair agent directly (GBR does this on timeout).
+            try { AgentModule.Instance()->GetAgentByInternalId(AgentId.Repair)->Hide(); }
+            catch (Exception e) { Svc.Log.Verbose($"[Repair] Agent Hide fallback failed: {e.Message}"); }
+            return false;
+        }
+
+        try { Callback.Fire(addon, true, -1); }
+        catch (Exception e) { Svc.Log.Verbose($"[Repair] CloseRepairWindow failed: {e.Message}"); }
+        return false; // not confirmed closed yet
     }
 
     /// <summary>Returns true when the Repair addon is open and ready.</summary>
@@ -118,16 +137,13 @@ public static unsafe class RepairManager
             return false;
         }
 
-        // ALL DONE: nothing left damaged. Close the Repair window (if open) and report complete.
+        // ALL DONE: nothing left damaged. Close the Repair window, retrying until it's actually
+        // gone (CloseRepairWindow returns true only once the addon is no longer visible).
         if (GetLowestDurabilityPercent() >= 100)
         {
-            if (RepairAddonReady())
-            {
-                if (EzThrottler.Throttle("AF_RepairClose", 500))
-                    CloseRepairWindow();
-                return false; // wait for the window to actually close before declaring done
-            }
-            return true;
+            if (EzThrottler.Throttle("AF_RepairClose", 300))
+                return CloseRepairWindow();
+            return false;
         }
 
         // 1) Open the Repair window if it isn't up yet.
