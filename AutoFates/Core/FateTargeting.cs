@@ -154,18 +154,33 @@ public static unsafe class FateTargeting
     /// whether they belong to a fate. Used to clean up accidental pulls before moving on so we're
     /// not stuck being beaten on by a stray mob. Nearest-first.
     /// </summary>
+    /// <summary>Our chocobo companion's object id (object whose OwnerId == our id), or 0.</summary>
+    public static ulong GetChocoboId()
+    {
+        var me = Player.Object;
+        if (me == null) return 0;
+        var myId = me.GameObjectId;
+        foreach (var obj in Svc.Objects)
+        {
+            if (obj.ObjectKind != Dalamud.Game.ClientState.Objects.Enums.ObjectKind.BattleNpc) continue;
+            if (obj.OwnerId == myId) return obj.GameObjectId;
+        }
+        return 0;
+    }
+
     public static List<IBattleNpc> GetEnemiesAttackingMe()
     {
         var me = Player.Object;
         var result = new List<IBattleNpc>();
         if (me == null) return result;
         var myId = me.GameObjectId;
+        var chocoId = GetChocoboId();
         foreach (var obj in Svc.Objects)
         {
             if (obj is not IBattleNpc bnpc) continue;
             if (!IsAttackableEnemy(bnpc)) continue;
-            // In combat with us = targeting the player.
-            if (bnpc.TargetObjectId != myId) continue;
+            // Hostile targeting us OR our chocobo.
+            if (bnpc.TargetObjectId != myId && (chocoId == 0 || bnpc.TargetObjectId != chocoId)) continue;
             result.Add(bnpc);
         }
         var mp = me.Position;

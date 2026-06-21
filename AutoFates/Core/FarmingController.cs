@@ -125,6 +125,17 @@ public sealed unsafe class FarmingController
         if (C.Mode == FarmingMode.SharedFates && (C.SharedFateSkipMaxed || C.StopWhenAllSharedFatesMaxed))
             Features.SharedFateTracker.EnsureData();
 
+        // Stray-aggro guard: if we're between fates (selecting/traveling) and something hostile is
+        // beating on us or our chocobo, drop into ClearingAggro to deal with it first. Checked
+        // continuously (not just at fate-end) since aggro can land at any time.
+        if ((State == FarmState.SelectingFate || State == FarmState.TravelingToFate
+             || State == FarmState.SelectingZone)
+            && FateTargeting.GetEnemiesAttackingMe().Count > 0)
+        {
+            Navigator.Stop();
+            State = FarmState.ClearingAggro;
+        }
+
         switch (State)
         {
             case FarmState.SelectingZone: TickSelectingZone(); break;
@@ -642,9 +653,13 @@ public sealed unsafe class FarmingController
     /// <summary>Kill any stray hostiles until we're out of combat, then resume fate selection.</summary>
     private void TickClearingAggro()
     {
-        // Done when we're no longer in combat AND nothing hostile is on us.
-        var hostile = FateTargeting.GetNearestHostile();
-        if (!InCombat() && hostile == null)
+        // Primary: enemies targeting us OR our chocobo. Secondary: anything hostile while still
+        // flagged in combat. Done when both are clear.
+        var attackers = FateTargeting.GetEnemiesAttackingMe();
+        var hostile = attackers.Count > 0 ? attackers[0]
+                    : (InCombat() ? FateTargeting.GetNearestHostile() : null);
+
+        if (hostile == null)
         {
             Navigator.Stop();
             IPCManager.StopCombat(C);
@@ -652,16 +667,9 @@ public sealed unsafe class FarmingController
             return;
         }
 
-        if (hostile == null)
-        {
-            // In combat but nothing nearby (e.g. mob running back) — just wait briefly.
-            Navigator.Stop();
-            return;
-        }
-
-        // Make sure we're targeting a hostile (prefer one attacking us, else nearest hostile).
-        var attacker = FateTargeting.EnsureAttackerTarget() ?? hostile;
-        if (!(Svc.Targets.Target is IBattleNpc cur && FateTargeting.IsAttackableEnemy(cur)))
+        var attacker = hostile;
+        if (!(Svc.Targets.Target is IBattleNpc cur && FateTargeting.IsAttackableEnemy(cur)
+              && (cur.GameObjectId == attacker.GameObjectId)))
             Svc.Targets.Target = attacker;
 
         StatusText = $"Clearing stray aggro: {attacker.Name}";
