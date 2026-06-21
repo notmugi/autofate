@@ -1,110 +1,129 @@
-# AutoFates
+# Autofate
 
-An FFXIV Dalamud plugin that automates FATE farming, built with **puni.sh paradigms**
-(ECommons foundation, EzIPC inter-plugin communication, TaskManager-driven automation).
+An FFXIV [Dalamud](https://github.com/goatcorp/Dalamud) plugin that automates FATE farming,
+built on puni.sh integrations (ECommons foundation, EzIPC inter-plugin communication).
 
-PLUGIN IS WORK IN PROGRESS. DO NOT EXPECT IT TO BE USABLE YET.
-plugin was made using AI. i do not claim to be a programmer and never have. use at your own risk.
+> [!WARNING]
+> **This plugin is VIBE CODED.** It was built almost entirely by prompting an AI, and i do NOT claim to be a programmer. I want this to be abundantly clear so there is no discourse. Use it if you like, or don't if you don't. It works well in practice, but the code is what it is. Use
+> at your own risk; Automation is frowned upon and can get you banned. but frankly puni.sh users already know this so idk why i'm even mentioning it.
+>
+> **Pull requests and help are very welcome.** If you're a real developer and want to clean
+> things up, fix the work-in-progress features, or add anything, please open an issue or PR. I'd be happy to take a look and include more human-authored code, as I'd like to get this code off of the slop codebase eventually. 
+
 ---
 
 ## Features
 
-### Farming modes
-- **Leveling** – farm fates to level your current class up to a target level.
-- **Single Zone** – farm one zone (button to set it to your current zone, or pick from a list).
-- **Shared FATEs** – rotates through all Shadowbringers / Endwalker / Dawntrail overworld zones.
-- **Atma** – the 12 ARR Zodiac zones.
-- **Demiatma** – the 6 Dawntrail zones (Urqopacha, Kozama'uka, Yak T'el, Shaaloani, Heritage Found, Living Memory).
-- **Luminous Crystals** – the 6 Heavensward zones.
-- **Memories** – the 3 Heavensward relic zones.
-- **Manual** – build your own zone list, set how many fates per zone, reset counters, and optionally loop.
+### Farming modules:
+- **Leveling**: farm fates to level your current class to a target level. Automatically teleports to best zone for your current level, with a configurable level based zone cap).
+- **Single Zone**: farm one zone (set it to your current zone or pick from a list).
+- **Shared FATEs**: rotate through ShB / EW / DT zones, track completion and leave when complete.
+- **Atma**: the 12 ARR zodiac relic zones.
+- **Demiatma**: the 6 Dawntrail phantom relic zones.
+- **Luminous Crystals** & **Memories**: the Heavensward anima relic zones.
+- **Manual**: build your own zone list, set fates-per-zone, reset counters, optionally loop it or terminate it when complete.
+
+Collection modes (Atma/Demiatma/Luminous/Memories) track the required items in your inventory, moves on when a zone's items are done, and stops when the whole list is collected.
 
 ### Fate engine
-- Enable/disable fate types: **Battle, Boss, Collect, Defend, Escort**.
-- Prioritize fates **lower on their timer** instead of closest, with a configurable minimum time before a fate is ignored.
+- Enable/disable fate types: **Battle, Boss, Defend, Escort** (Collect is WIP, see below).
+- Prioritize fates **lower on their timer** instead of closest, with a minimum-time cutoff.
 - Run fates up to **N levels above** your level (default 2).
-- **Auto level-sync** to the target fate — only syncs once you arrive, so you don't sync to fates you pass through.
-- Mass-pull toggle, safe-distance from non-fate enemies, auto AOE dodge (when not using BMR).
+- **Auto level-sync** to the target fate: Sync upon arrival to fate so as not to accidentally sync with fates along the path.
+- **Mass-pull** toggle with a configurable enemy cap (can only adhere to this as best as reasonably possible)
+- **FATE blacklist**: never navigate to named fates.
+- **Follow party leader**: skip our own pathing and just run whatever fate the leader drops us
+  in (great for multiboxing & farming with friends).
 
-### Combat backends (you choose)
-- **Rotation:** Wrath Combo, Rotation Solver Reborn, or BossMod Reborn autorotation.
-- **Movement / AOE dodging:** BossMod Reborn AI, or vnavmesh-only.
-- If a selected backend isn't installed, AutoFates refuses to start and tells you in chat.
+### Combat
+- **Rotation backend:** Wrath Combo or Rotation Solver Reborn.
+- **Movement / AOE dodging:** **BossMod Reborn AI is required**. it handles all AOE dodging and general avoidance tech.
+- If a required backend isn't installed, Autofate refuses to start and tells you in chat.
 
 ### Travel
-- vnavmesh navigation with **automatic mounting and flight** (pick your preferred mount).
-- Lifestream for between-zone teleporting and an optional "go here when finished" command.
+- vnavmesh navigation with automatic mounting / flight (pick your mount).
+- Lifestream for between-zone teleporting and an optional end-of-run command + chocobo leveling (see below)
 
 ### Chocobo
-- Companion stance (Defender/Attacker/Healer) with **auto-Healer-stance when your HP drops** below a threshold.
+- Companion stance (Defender/Attacker/Healer) with **auto-Healer when your or the chocobo's HP drops** below a user-defined threshold.
 - Auto re-use **Gysahl Greens** before the companion times out.
-- **Auto chocobo leveling:** travel home, recall, stable, train, feed Thavnairian Onions / Curiel Roots, auto-clean with Magicked Stable Brooms, and stop at your target rank.
+- **Auto leveling:** travel home, recall, stable, train, feed Thavnairian Onions and stop at your target rank. You can define the location of your houses chocobo stable and have it automatically use the onion to level your chocobo! **(requires onions to be in inventory)**
 
 ### Upkeep
-- **Food & potions:** scans your inventory, lets you pick what you own, and re-applies before the buff expires.
-- **Auto repair:** self-repair (swaps to your crafter gearset, needs Dark Matter — stops farming if you run out) or mender NPC, with a durability threshold.
-- **Storage:** pull consumables from the chocobo saddlebag (retainer support via AutoRetainer is a work-in-progress).
+- **Food & potions:** scans the inventory for your food and pots, and it will use them before the timer is up.
+- **Auto repair:** self-repair with Dark Matter (stops farming if you run out), with a
+  durability threshold.
 
 ### Gemstones
-- Bicolor gemstone buy-list with per-item target quantities (or continuous buying), a buy threshold, and live import from an open vendor.
-- Tracks **gross gemstones gained** across the whole session (auto-purchases are *not* subtracted from the count).
+- Bicolor gemstone buy-list with per-item targets (or continuous buying) and a buy threshold.
+- Auto-travel to your captured vendor, buy, and return to farming.
+- Tracks **gross gemstones gained** across the session.
 
 ### Stop triggers
-- Stop at desired level, gemstone count, chocobo max level, or when all vendor buy-list targets are met.
+- Stop at desired level, gemstone count, chocobo max level, vendor targets met, or (in leveling mode) after dying twice. <- this is to prevent infinitely running overnight and dying over and over like an idiot if you reach a level you do not have gear for.
 
 ---
 
-## Building
+## WIP features
 
-This repo uses **ECommons as a git submodule** (built from source, not version-pinned).
+These are present in the code but **disabled/greyed in the UI**. They're good first
+contributions — search the code for `TODO(WIP)` to find each one:
 
-```bash
-git clone <this repo>
-cd Autofates
-git submodule update --init --recursive
-dotnet build AutoFates/AutoFates.csproj -c Release
+- **Collect fates** — classification + item tracking exist, but the turn-in loop needs some work. at the moment, I'm struggling to get the plugin to correctly follow the desired loop for turnins. Talk to NPC -> spam through dialogue -> accept YesNo dialogue -> collect materials and do battle -> turn in items at NPC. currently, the most problematic part of this whole thing is turning in the items. it just loops over and over trying to open the turnin dialogue and gets stuck. contributions would be massively helpful here <333
+- **Escort fates** Work... but some have some minor problems like the one in camp bluefog that sometimes walks through another fate. please contribute with a PR if you know how to fix this behavior!
+- **Mender NPC repair** — only self-repair is automated; NPC routing is unfinished. I didnt have the time, money, or energy to implement a second form of repairs, i work a full time job and just wanted a product that is in a good working state. if you know how to get this working, that would be fantastic. an example of navigating the repair window is currently already available through self repair, and an example of setting a desired npc location is available through the bicolor shop and alternatively through the chocobo stable section.
+- **BMR autorotation preset** — the preset and IPC are there, but its not hooked up properly and seems to fail starting combat. for now, only wrath and RSR are supported, but help here would also be appreciated greatly.
+
+---
+## Installing
+
+**As a repo (recommended):** `/xlsettings` → **Experimental** → **Custom Plugin Repositories**,
+paste:
+
+```
+https://raw.githubusercontent.com/notmugi/autofate/main/repo.json
 ```
 
-Output: `AutoFates/bin/x64/Release/AutoFates.dll` (and a packaged `AutoFates/latest.zip`).
-
-The build references your local Dalamud dev libraries at `~/.xlcore/dalamud/Hooks/dev/`
-(override with `-p:DalamudLibPath=...`). Targets `net10.0-windows`, Dalamud API level 15.
-
-## Installing (dev plugin)
-
-1. In-game: **Dalamud Settings → Experimental → Dev Plugin Locations**.
-2. Add the full path to `AutoFates.dll` above.
-3. **Plugin Installer → Dev Tools → Installed Dev Plugins → AutoFates → Load**.
+**As a dev plugin:** add the path to `Autofate.dll` under **Dev Plugin Locations**, then load it
+from **Plugin Installer → Dev Tools**.
 
 ### Commands
 - `/autofates`, `/autofate`, `/af` — open the window.
 - `/af start`, `/af stop`, `/af toggle` — control farming.
 
 ## Recommended companion plugins
-- **vnavmesh** (navigation) — required unless you only use follow-party-leader with BMR.
+- **vnavmesh** (navigation) — required.
+- **BossMod Reborn** — required (movement + AOE dodging).
+- **Wrath Combo** or **Rotation Solver Reborn** — at least one, for the rotation.
 - **Lifestream** (teleporting / housing travel).
-- **BossMod Reborn**, **Wrath Combo**, or **Rotation Solver Reborn** (at least one, for combat).
-- **AutoRetainer** (optional, for retainer storage).
+- **AutoRetainer** (optional). (Currently WIP)
 
 ---
+## Building
 
-## Known tuning points (work-in-progress)
+Uses **ECommons as a git submodule** (built from source).
 
-These are wired up structurally but were written without a live game to verify against, so
-expect to refine them during testing:
+```bash
+git clone https://github.com/notmugi/autofate
+cd autofate
+git submodule update --init --recursive
+dotnet build Autofate/Autofate.csproj -c Release
+```
 
-- **Collect-fate hand-in math** — item pickup + turn-in addon flow is stubbed; the
-  classification and target-item detection work, but the precise "turn in N, measure delta,
-  collect more" loop needs in-game calibration.
-- **Escort fates** — follow/defend behavior relies on the combat backend; manual escort pacing
-  is minimal.
-- **NPC repair navigation** — only self-repair is automated for now.
-- **Chocobo stable addon interactions** — navigation, recall, and feeding are wired; the exact
-  right-click-stable menu steps need verification.
-- **Gemstone vendor navigation** — purchasing from an open vendor works (via ECommons
-  AddonMaster); auto-walking to the vendor NPC is not yet automated (open it yourself).
-- **Retainer withdrawal** — detection is in place; item movement is deferred (Artisan /
-  GatherBuddy Reborn / Vulcan are good references for full retainer inventory access).
+Output: `Autofate/bin/x64/Release/Autofate.dll`. The build references your local Dalamud dev
+libraries at `~/.xlcore/dalamud/Hooks/dev/` (override with `-p:DalamudLibPath=...`). Targets
+`net10.0-windows`, Dalamud API level 15.
+## Updating the published plugin (maintainer)
 
-Fate-type icon ids and `Fate.Rule` values used for classification are best-effort and may need
-adjustment once observed in-game.
+```bash
+./update-build.sh        # clean rebuild, repackage latest.zip, sync repo.json versions
+git commit -am "Update build" && git push
+```
+
+The version comes from `Autofate/Autofate.csproj` (`<Version>`). Bump it there before running
+the script. See [SETUP.md](SETUP.md) for details and the icon/description instructions.
+
+## Contributing
+
+Issues and PRs are welcome — bug reports, fixes, or finishing the WIP features above. There's no
+formal style guide; just keep it readable.

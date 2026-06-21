@@ -1,6 +1,6 @@
-# Publishing AutoFates as a Dalamud repo (no tags, no releases)
+# Publishing Autofate as a Dalamud repo (no tags, no releases)
 
-AutoFates is served **directly from the `main` branch**. There are no GitHub Releases and no
+Autofate is served **directly from the `main` branch**. There are no GitHub Releases and no
 tags involved. Dalamud reads `repo.json` and the plugin zip straight from the raw files in the
 repo.
 
@@ -36,7 +36,7 @@ git push -u origin main
 https://raw.githubusercontent.com/notmugi/autofate/main/repo.json
 ```
 
-**Save and Close** → open `/xlplugins` → click the **refresh** icon → search **AutoFates**.
+**Save and Close** → open `/xlplugins` → click the **refresh** icon → search **Autofate**.
 
 > Use the `raw.githubusercontent.com` URL, NOT the `github.com/.../blob/...` page URL.
 
@@ -57,4 +57,25 @@ git push
 
 You can always side-load the built DLL directly:
 `/xlsettings` → **Experimental** → **Dev Plugin Locations** → add the path to
-`AutoFates/bin/x64/Release/AutoFates.dll`, then **Dev Tools → Installed Dev Plugins → Load**.
+`Autofate/bin/x64/Release/Autofate.dll`, then **Dev Tools → Installed Dev Plugins → Load**.
+
+## Updating the icon
+
+The plugin icon is a **512×512 PNG** at `Autofate/images/icon.png`. A plain-white placeholder
+ships in the repo (`icon.svg` is the editable source).
+
+1. Replace `Autofate/images/icon.png` with your 512×512 PNG (keep the same path/filename).
+2. Commit + push. `repo.json` already points Dalamud at:
+   `https://raw.githubusercontent.com/notmugi/autofate/main/Autofate/images/icon.png`
+
+No other changes needed — the in-game installer picks it up (after the ~5 min CDN cache).
+
+## Updating the name / description / tags
+
+These live in **two** places and should be kept in sync:
+
+- `Autofate/Autofate.json` — `Name`, `Punchline`, `Description`, `Tags`, `CategoryTags`
+  (this is what gets packed into `latest.zip`).
+- `repo.json` — same fields, used by the repo listing before install.
+
+Edit both, then run `./update-build.sh push`.

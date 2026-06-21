@@ -12,7 +12,7 @@ OWNER="$1"
 PLACEHOLDER="YOUR_GITHUB_USERNAME"
 
 # Files that may contain the placeholder.
-FILES=(repo.json SETUP.md README.md AutoFates/AutoFates.json)
+FILES=(repo.json SETUP.md README.md Autofate/Autofate.json)
 
 for f in "${FILES[@]}"; do
   if [ -f "$f" ] && grep -q "$PLACEHOLDER" "$f"; then
@@ -22,9 +22,9 @@ for f in "${FILES[@]}"; do
 done
 
 # Update RepoUrl in the plugin manifest too (it uses a different placeholder).
-if [ -f AutoFates/AutoFates.json ]; then
-  sed -i "s#https://github.com/yourname/AutoFates#https://github.com/$OWNER/AutoFates#g" AutoFates/AutoFates.json
-  echo "Updated AutoFates/AutoFates.json RepoUrl"
+if [ -f Autofate/Autofate.json ]; then
+  sed -i "s#https://github.com/yourname/Autofate#https://github.com/$OWNER/Autofate#g" Autofate/Autofate.json
+  echo "Updated Autofate/Autofate.json RepoUrl"
 fi
 
 echo "Done. Owner set to '$OWNER'."

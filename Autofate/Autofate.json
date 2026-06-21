@@ -1,0 +1,26 @@
+{
+  "Author": "Autofate",
+  "Name": "Autofate",
+  "InternalName": "Autofate",
+  "Punchline": "Automated FATE farming with puni.sh-style integrations.",
+  "Description": "Automated fate farming plugin that supports Leveling, Shared fates, Atma, Demiatma, Memories, Luminous crystals, Chocobo leveling, Bicolor gemstone purchase lists, and more!",
+  "RepoUrl": "https://github.com/notmugi/autofate",
+  "ApplicableVersion": "any",
+  "Tags": [
+    "fate",
+    "farming",
+    "automation",
+    "leveling",
+    "chocobo"
+  ],
+  "CategoryTags": [
+    "utility"
+  ],
+  "LoadRequiredState": 0,
+  "LoadSync": false,
+  "CanUnloadAsync": false,
+  "LoadPriority": 0,
+  "IconUrl": "",
+  "AcceptsFeedback": false,
+  "DalamudApiLevel": 15
+}

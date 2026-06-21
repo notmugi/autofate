@@ -1,0 +1,323 @@
+using System.Linq;
+using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Utility.Raii;
+using ECommons.DalamudServices;
+using ECommons.ImGuiMethods;
+
+namespace Autofate.UI;
+
+public sealed partial class MainWindow
+{
+    // Cached zone list for the picker (built lazily).
+    private List<(uint Id, string Name)>? _fieldZones;
+    private string _zoneSearch = string.Empty;
+
+    private List<(uint Id, string Name)> FieldZones()
+        => _fieldZones ??= Data.Zones.AllFieldZones().OrderBy(z => z.Name).ToList();
+
+    private void DrawModeTab()
+    {
+        ImGui.TextWrapped("Choose what kind of FATE farming to do.");
+        ImGui.Spacing();
+
+        var mode = C.Mode;
+        if (ImGuiEx.EnumCombo("Farming Mode", ref mode, ModeNames))
+        {
+            C.Mode = mode;
+            Save();
+        }
+
+        ImGui.Separator();
+
+        switch (C.Mode)
+        {
+            case FarmingMode.Leveling: DrawLevelingMode(); break;
+            case FarmingMode.SingleZone: DrawSingleZoneMode(); break;
+            case FarmingMode.SharedFates: DrawSharedFatesMode(); break;
+            case FarmingMode.Atma:
+            case FarmingMode.Demiatma:
+            case FarmingMode.LuminousCrystals:
+            case FarmingMode.Memories:
+                DrawFixedZoneMode();
+                break;
+            case FarmingMode.Manual: DrawManualMode(); break;
+        }
+    }
+
+    private static readonly Dictionary<FarmingMode, string> ModeNames = new()
+    {
+        [FarmingMode.Leveling] = "Leveling (current class)",
+        [FarmingMode.SingleZone] = "Single Zone",
+        [FarmingMode.SharedFates] = "Shared FATEs (ShB/EW/DT)",
+        [FarmingMode.Atma] = "Atma (ARR Zodiac)",
+        [FarmingMode.Demiatma] = "Demiatma (Dawntrail)",
+        [FarmingMode.LuminousCrystals] = "Luminous Crystals (HW)",
+        [FarmingMode.Memories] = "Memories (HW relic)",
+        [FarmingMode.Manual] = "Manual selection",
+    };
+
+    private void DrawLevelingMode()
+    {
+        ImGui.TextWrapped("Farms FATEs in the best zone for your level. The slider caps which zone "
+            + "we farm in: set it to 50 and we stay in the level-50 zone even past 50. Stopping at a "
+            + "target level is set separately in the Stop Triggers tab.");
+        ImGui.Spacing();
+        var cap = C.LevelingZoneCap;
+        if (ImGui.SliderInt("Fate level cap (zone)", ref cap, 1, 100))
+        {
+            C.LevelingZoneCap = Math.Clamp(cap, 1, 100);
+            Save();
+        }
+        var effLevel = Math.Min(ECommons.GameHelpers.Player.Level, C.LevelingZoneCap);
+        ImGui.TextDisabled($"Current level: {ECommons.GameHelpers.Player.Level}  |  Farming zone: "
+            + $"{Data.LevelingZones.BestZoneNameForLevel(effLevel)} (lv {effLevel})");
+    }
+
+    private void DrawSingleZoneMode()
+    {
+        ImGui.TextWrapped("Farms FATEs in a single zone.");
+        ImGui.Spacing();
+
+        var current = Svc.ClientState.TerritoryType;
+        if (ImGui.Button("Set to current zone"))
+        {
+            C.SingleZoneTerritory = current;
+            Save();
+        }
+        ImGui.SameLine();
+        var name = C.SingleZoneTerritory != 0 ? Data.Zones.GetTerritoryName(C.SingleZoneTerritory) : "<none>";
+        ImGui.TextUnformatted($"Selected: {name}");
+
+        ImGui.Spacing();
+        DrawZonePicker("##singlezonepicker", id =>
+        {
+            C.SingleZoneTerritory = id;
+            Save();
+        });
+    }
+
+    private void DrawSharedFatesMode()
+    {
+        ImGui.TextWrapped("Shared FATEs are the FATEs in Shadowbringers, Endwalker, and Dawntrail "
+            + "overworld zones. The plugin rotates through these zones and can use the in-game "
+            + "Shared FATE tracker to skip/stop zones once their rank is maxed.");
+        ImGui.Spacing();
+
+        ImGui.TextUnformatted("Expansions to farm:");
+        var shb = C.SharedFateShB;
+        if (ImGui.Checkbox("Shadowbringers", ref shb)) { C.SharedFateShB = shb; Save(); }
+        ImGui.SameLine();
+        var ew = C.SharedFateEW;
+        if (ImGui.Checkbox("Endwalker", ref ew)) { C.SharedFateEW = ew; Save(); }
+        ImGui.SameLine();
+        var dt = C.SharedFateDT;
+        if (ImGui.Checkbox("Dawntrail", ref dt)) { C.SharedFateDT = dt; Save(); }
+
+        if (!C.SharedFateShB && !C.SharedFateEW && !C.SharedFateDT)
+            ECommons.ImGuiMethods.ImGuiEx.Text(new System.Numerics.Vector4(0.9f, 0.5f, 0.2f, 1f),
+                "Select at least one expansion or there will be no zones to farm.");
+
+        ImGui.Separator();
+
+        var skip = C.SharedFateSkipMaxed;
+        if (ImGui.Checkbox("Skip zones whose shared-fate rank is maxed", ref skip)) { C.SharedFateSkipMaxed = skip; Save(); }
+
+        var stopAll = C.StopWhenAllSharedFatesMaxed;
+        if (ImGui.Checkbox("Stop farming when ALL shared-fate zones are maxed", ref stopAll)) { C.StopWhenAllSharedFatesMaxed = stopAll; Save(); }
+
+        ImGui.Separator();
+
+        var hasData = Features.SharedFateTracker.HasData();
+        if (!hasData)
+        {
+            ImGui.TextDisabled("Shared FATE tracker data not loaded yet.");
+            if (ImGui.Button("Load tracker data"))
+                Features.SharedFateTracker.EnsureData();
+            ImGui.SameLine();
+            Help("Opens the in-game Shared FATE window briefly to populate rank/progress data. "
+                + "This happens automatically while farming in this mode.");
+
+            ImGui.Spacing();
+            var zones = Data.Zones.SharedFateZones(C.SelectedSharedFateExpansions()).OrderBy(z => z.Name).ToList();
+            ImGui.TextDisabled($"{zones.Count} shared-fate zones selected (names only):");
+            using var box = ImRaii.Child("##sfzones", new System.Numerics.Vector2(0, 180), true);
+            foreach (var z in zones)
+                ImGui.TextUnformatted(z.Name);
+            return;
+        }
+
+        var selectedZones = Data.Zones.SharedFateZones(C.SelectedSharedFateExpansions())
+            .Select(z => z.TerritoryId).ToHashSet();
+        var data = Features.SharedFateTracker.GetAllZones()
+            .Where(z => selectedZones.Contains(z.TerritoryId))
+            .OrderBy(z => z.IsMaxed)
+            .ThenBy(z => z.ZoneName)
+            .ToList();
+        ImGui.TextDisabled($"{data.Count(z => z.IsMaxed)}/{data.Count} selected zones maxed.");
+
+        using (var tbl = ImRaii.Table("##sftracker", 3, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY,
+                   new System.Numerics.Vector2(0, 320)))
+        {
+            if (tbl)
+            {
+                ImGui.TableSetupColumn("Zone", ImGuiTableColumnFlags.WidthStretch);
+                ImGui.TableSetupColumn("Rank", ImGuiTableColumnFlags.WidthFixed, 70);
+                ImGui.TableSetupColumn("Fates", ImGuiTableColumnFlags.WidthFixed, 70);
+                ImGui.TableHeadersRow();
+                foreach (var z in data)
+                {
+                    ImGui.TableNextRow();
+                    ImGui.TableNextColumn();
+                    if (z.IsMaxed)
+                        ECommons.ImGuiMethods.ImGuiEx.Text(new System.Numerics.Vector4(0.4f, 0.9f, 0.4f, 1f), z.ZoneName + " (max)");
+                    else
+                        ImGui.TextUnformatted(z.ZoneName);
+                    ImGui.TableNextColumn();
+                    ImGui.TextUnformatted($"{z.CurrentRank}/{z.MaxRank}");
+                    ImGui.TableNextColumn();
+                    // Show progress to 60 fates (MaxRank is only the current stage cap, not completion).
+                    ImGui.TextUnformatted($"{z.FateProgress}/60");
+                }
+            }
+        }
+    }
+
+    private void DrawFixedZoneMode()
+    {
+        var reqs = Data.CollectionRequirements.ForMode(C.Mode);
+        ImGui.TextWrapped("Tracks these collectables in your inventory. When a zone's items are all "
+            + "collected it moves on; when the whole list is done it stops.");
+        ImGui.Spacing();
+
+        var done = System.Array.TrueForAll(reqs, r => Features.InventoryUtil.GetItemCount(r.ItemId) >= r.Required);
+        var greenV = new System.Numerics.Vector4(0.4f, 0.9f, 0.4f, 1f);
+        var redV = new System.Numerics.Vector4(0.95f, 0.6f, 0.3f, 1f);
+
+        using (var tbl = ImRaii.Table("##collectreqs", 3, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg))
+        {
+            if (tbl)
+            {
+                ImGui.TableSetupColumn("Item", ImGuiTableColumnFlags.WidthStretch);
+                ImGui.TableSetupColumn("Have/Need", ImGuiTableColumnFlags.WidthFixed, 90);
+                ImGui.TableSetupColumn("Zone(s)", ImGuiTableColumnFlags.WidthStretch);
+                ImGui.TableHeadersRow();
+                foreach (var r in reqs)
+                {
+                    var have = Features.InventoryUtil.GetItemCount(r.ItemId);
+                    var ok = have >= r.Required;
+                    ImGui.TableNextRow();
+                    ImGui.TableNextColumn();
+                    ImGui.TextUnformatted(r.ItemName);
+                    ImGui.TableNextColumn();
+                    ECommons.ImGuiMethods.ImGuiEx.Text(ok ? greenV : redV, $"{have}/{r.Required}");
+                    ImGui.TableNextColumn();
+                    ImGui.TextUnformatted(string.Join(", ", r.Zones));
+                }
+            }
+        }
+
+        ImGui.Spacing();
+        if (done)
+            ECommons.ImGuiMethods.ImGuiEx.Text(greenV, "All collectables obtained \u2713");
+        else
+            ImGui.TextUnformatted("Farming in progress\u2026");
+    }
+
+    private void DrawManualMode()
+    {
+        ImGui.TextWrapped("Build a custom list of zones, set how many fates to run in each, and "
+            + "optionally loop the list.");
+        ImGui.Spacing();
+
+        var loop = C.ManualLoop;
+        if (ImGui.Checkbox("Loop list", ref loop)) { C.ManualLoop = loop; Save(); }
+
+        ImGui.Separator();
+
+        ManualZoneEntry? toRemove = null;
+        using (var tbl = ImRaii.Table("##manualzones", 4, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg))
+        {
+            if (tbl)
+            {
+                ImGui.TableSetupColumn("Zone", ImGuiTableColumnFlags.WidthStretch);
+                ImGui.TableSetupColumn("Fates", ImGuiTableColumnFlags.WidthFixed, 90);
+                ImGui.TableSetupColumn("Done", ImGuiTableColumnFlags.WidthFixed, 100);
+                ImGui.TableSetupColumn("##act", ImGuiTableColumnFlags.WidthFixed, 70);
+                ImGui.TableHeadersRow();
+
+                foreach (var entry in C.ManualZones)
+                {
+                    ImGui.TableNextRow();
+                    ImGui.TableNextColumn();
+                    ImGui.TextUnformatted(entry.Name);
+
+                    ImGui.TableNextColumn();
+                    ImGui.SetNextItemWidth(-1);
+                    var n = entry.FatesToRun;
+                    if (ImGui.InputInt($"##fates{entry.GetHashCode()}", ref n))
+                    {
+                        entry.FatesToRun = Math.Max(0, n);
+                        Save();
+                    }
+
+                    ImGui.TableNextColumn();
+                    ImGui.TextUnformatted($"{entry.FatesDone}");
+                    ImGui.SameLine();
+                    if (ImGui.SmallButton($"Reset##{entry.GetHashCode()}"))
+                    {
+                        entry.ResetCounter();
+                        Save();
+                    }
+
+                    ImGui.TableNextColumn();
+                    if (ImGui.SmallButton($"Remove##{entry.GetHashCode()}"))
+                        toRemove = entry;
+                }
+            }
+        }
+        if (toRemove != null)
+        {
+            C.ManualZones.Remove(toRemove);
+            Save();
+        }
+
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Add a zone:");
+        if (ImGui.Button("Add current zone"))
+        {
+            AddManualZone(Svc.ClientState.TerritoryType);
+        }
+        DrawZonePicker("##manualpicker", AddManualZone);
+    }
+
+    private void AddManualZone(uint territoryId)
+    {
+        if (territoryId == 0) return;
+        if (C.ManualZones.Any(z => z.TerritoryId == territoryId)) return;
+        C.ManualZones.Add(new ManualZoneEntry
+        {
+            TerritoryId = territoryId,
+            Name = Data.Zones.GetTerritoryName(territoryId),
+            FatesToRun = 5,
+        });
+        Save();
+    }
+
+    /// <summary>A searchable zone dropdown; invokes onPick with the selected territory id.</summary>
+    private void DrawZonePicker(string id, Action<uint> onPick)
+    {
+        using var combo = ImRaii.Combo(id, "Select a zone...");
+        if (!combo) return;
+
+        ImGui.SetNextItemWidth(-1);
+        ImGui.InputTextWithHint("##zonesearch", "search", ref _zoneSearch, 64);
+        foreach (var z in FieldZones())
+        {
+            if (!string.IsNullOrEmpty(_zoneSearch)
+                && !z.Name.Contains(_zoneSearch, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (ImGui.Selectable($"{z.Name}##{z.Id}"))
+                onPick(z.Id);
+        }
+    }
+}
