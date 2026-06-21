@@ -125,6 +125,11 @@ public sealed unsafe class FarmingController
         if (C.Mode == FarmingMode.SharedFates && (C.SharedFateSkipMaxed || C.StopWhenAllSharedFatesMaxed))
             Features.SharedFateTracker.EnsureData();
 
+        // SYNC ASAP: if we're physically standing inside a running fate and not yet level-synced,
+        // sync immediately — handles the case where the plugin is started while already in a fate.
+        if (C.AutoLevelSync && IsInsideAnyRunningFate())
+            SyncToFate();
+
         // Stray-aggro guard: if we're between fates (selecting/traveling) and something hostile is
         // beating on us or our chocobo, drop into ClearingAggro to deal with it first. Checked
         // continuously (not just at fate-end) since aggro can land at any time.
@@ -430,6 +435,9 @@ public sealed unsafe class FarmingController
         if (me == null) return false;
         return Vector3.Distance(me.Position, fate.Position) <= fate.Radius;
     }
+
+    /// <summary>True if we're physically standing inside any currently-running fate's ring.</summary>
+    private static bool IsInsideAnyRunningFate() => FateSelector.GetCurrentFate() != null;
 
     private void SyncToFate()
     {
