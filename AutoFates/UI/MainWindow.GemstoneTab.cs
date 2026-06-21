@@ -22,6 +22,14 @@ public sealed partial class MainWindow
 
         ImGui.TextDisabled($"You currently hold {Features.InventoryUtil.GetGemstoneCount()} bicolor gemstones.");
 
+        if (C.VendorPositionSet)
+        {
+            ImGui.TextDisabled($"Vendor zone: {Data.Zones.GetTerritoryName(C.VendorTerritory)} — will teleport to the nearest aetheryte ({Core.Teleporter.FindAetheryteName(C.VendorTerritory) ?? "?"}).");
+            if (ImGui.SmallButton("Clear vendor location")) { C.VendorPositionSet = false; C.VendorDataId = 0; C.VendorName = string.Empty; C.VendorTerritory = 0; Save(); }
+        }
+        else
+            ImGui.TextDisabled("Vendor zone not set — add an item below while the vendor is open to capture it.");
+
         ImGui.Separator();
         ImGui.TextUnformatted("Buy list:");
 
@@ -74,6 +82,9 @@ public sealed partial class MainWindow
                 if (ImGui.SmallButton($"Add##{offer.ItemId}"))
                 {
                     C.GemstoneBuyList.Add(new GemstoneBuyEntry { ItemId = offer.ItemId, Name = offer.Name, TargetQuantity = 0 });
+                    // Capture the vendor's zone + our current spot: we're standing at the vendor when
+                    // its shop is open, so this records where to teleport/navigate back to.
+                    CaptureVendorLocationFromHere();
                     Save();
                 }
                 ImGui.SameLine();
@@ -84,5 +95,32 @@ public sealed partial class MainWindow
         {
             ImGui.TextDisabled("Open the bicolor gemstone vendor in-game to import its item list here.");
         }
+    }
+
+    /// <summary>
+    /// Record the vendor's zone (and our current position, which is at the vendor while shopping)
+    /// so the controller can teleport to the nearest aetheryte and navigate back here later.
+    /// </summary>
+    private void CaptureVendorLocationFromHere()
+    {
+        var me = ECommons.GameHelpers.Player.Object;
+        if (me == null) return;
+        // Prefer the actually-targeted NPC if it's the one we're trading with; else just our spot.
+        var tgt = ECommons.DalamudServices.Svc.Targets.Target;
+        if (tgt != null)
+        {
+            C.VendorDataId = tgt.BaseId;
+            C.VendorName = tgt.Name.TextValue;
+            C.VendorPosition = tgt.Position;
+        }
+        else
+        {
+            C.VendorDataId = 0;
+            C.VendorName = string.Empty;
+            C.VendorPosition = me.Position;
+        }
+        C.VendorTerritory = ECommons.DalamudServices.Svc.ClientState.TerritoryType;
+        C.VendorPositionSet = true;
+        ECommons.DalamudServices.Svc.Chat.Print($"[AutoFates] Gemstone vendor zone captured: {Data.Zones.GetTerritoryName(C.VendorTerritory)}.");
     }
 }

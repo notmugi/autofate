@@ -158,7 +158,6 @@ public sealed class Configuration
     public bool AutoRepair = true;
     public int RepairThresholdPercent = 30;
     public RepairMode RepairMode = RepairMode.SelfRepair;
-    public int RepairGearsetNumber = 1; // crafter gearset for self-repair
 
     // ------------------------------------------------------------------ Retainer / saddlebag
     public bool UseRetainerStorage = false;
@@ -172,6 +171,16 @@ public sealed class Configuration
     public int GemstoneBuyThreshold = 1000;
     /// <summary>Which gemstone vendor NPC to buy from (place name / npc identifier).</summary>
     public string GemstoneVendor = "Gemstone Trader";
+    // Captured vendor location (target the vendor NPC in-game, then "Add targeted vendor").
+    /// <summary>DataId (BaseId) of the captured vendor NPC (0 = not captured). Used to find the exact NPC to interact with.</summary>
+    public uint VendorDataId;
+    /// <summary>Display name of the captured vendor NPC (for the UI).</summary>
+    public string VendorName = string.Empty;
+    /// <summary>World position of the captured vendor NPC, for vnav navigation.</summary>
+    public System.Numerics.Vector3 VendorPosition;
+    /// <summary>Territory the vendor NPC lives in (we teleport here before navigating to it).</summary>
+    public uint VendorTerritory;
+    public bool VendorPositionSet = false;
 
     // ------------------------------------------------------------------ UI / misc
     public bool VerboseLogging = false;

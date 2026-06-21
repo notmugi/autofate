@@ -195,17 +195,23 @@ public static unsafe class FateTargeting
 
     /// <summary>
     /// Mass-pull target picker: the nearest fate enemy that is NOT already gathered up on us (i.e.
-    /// further than <paramref name="gatheredRange"/>), so we can walk over and body-pull it into
-    /// the pile. Returns null if every fate enemy is already gathered (or none exist).
+    /// further than <paramref name="gatheredRange"/>) but still within <paramref name="leashRange"/>
+    /// so we body-pull nearby stragglers into the pile WITHOUT sprinting across the whole fate.
+    /// Returns null if there's nothing to pull within the leash (or no enemies at all).
     /// </summary>
-    public static IBattleNpc? GetNearestUngatheredEnemy(ushort fateId, float gatheredRange)
+    public static IBattleNpc? GetNearestUngatheredEnemy(ushort fateId, float gatheredRange, float leashRange)
     {
         var me = Player.Object;
         if (me == null) return null;
         var gSq = gatheredRange * gatheredRange;
+        var lSq = leashRange * leashRange;
         foreach (var e in GetFateEnemies(fateId)) // nearest-first
-            if (Vector3.DistanceSquared(me.Position, e.Position) > gSq)
-                return e;
+        {
+            var d = Vector3.DistanceSquared(me.Position, e.Position);
+            if (d <= gSq) continue;       // already gathered on us
+            if (d > lSq) return null;      // nearest ungathered is beyond leash -> don't chase
+            return e;
+        }
         return null;
     }
 

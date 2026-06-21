@@ -47,16 +47,41 @@ public static unsafe class SharedFateTracker
     {
         if (HasData()) return true;
         if (ECommons.GenericHelpers.IsOccupied()) return false;
-
-        var a = Agent;
-        if (a == null) return false;
-
-        if (EzThrottler.Throttle("AF_OpenFateProgress", 3000))
-        {
-            try { a->Show(); }
-            catch (Exception e) { Svc.Log.Verbose($"[SharedFate] Show failed: {e.Message}"); }
-        }
+        FireOpenCommand();
         return HasData();
+    }
+
+    /// <summary>
+    /// Periodically re-open the Shared FATE window to repopulate fresh per-zone data. The agent's
+    /// cache goes stale after we complete fates, so we re-fire MainCommand 84 on an interval (and
+    /// immediately close the window again so it doesn't sit on screen). Call this each tick; it's
+    /// throttled internally to <paramref name="intervalMs"/>.
+    /// </summary>
+    public static void RefreshData(int intervalMs = 60000, bool force = false)
+    {
+        if (ECommons.GenericHelpers.IsOccupied()) return;
+        if (!force && !EzThrottler.Throttle("AF_RefreshFateProgress", intervalMs)) return;
+        FireOpenCommand(force);
+        // Close it right back so it doesn't linger on screen; the agent keeps the refreshed data.
+        try { ECommons.Automation.WindowsKeypress.SendKeypress(ECommons.Interop.LimitedKeys.Escape); }
+        catch { /* ignore */ }
+    }
+
+    /// <summary>
+    /// Open the Shared FATE window exactly like the in-game Travel menu / keybind does: fire
+    /// MainCommand 84 ("Shared FATE") via the UIModule. This populates the agent's per-zone data
+    /// (a->Show() alone doesn't reliably load it).
+    /// </summary>
+    private static void FireOpenCommand(bool force = false)
+    {
+        if (Agent == null) return;
+        if (!force && !EzThrottler.Throttle("AF_OpenFateProgress", 3000)) return;
+        try
+        {
+            FFXIVClientStructs.FFXIV.Client.System.Framework.Framework.Instance()
+                ->GetUIModule()->ExecuteMainCommand(84);
+        }
+        catch (Exception e) { Svc.Log.Verbose($"[SharedFate] ExecuteMainCommand(84) failed: {e.Message}"); }
     }
 
     /// <summary>Read all zones across all expansion tabs.</summary>

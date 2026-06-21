@@ -58,7 +58,18 @@ public static unsafe class ChocoboStableRoutine
             return false;
         }
 
-        // We have onions and we're under target level -> stable now.
+        // Only stable+train once the chocobo's XP bar is FULL for its current rank. Stabling does
+        // not earn XP — the chocobo must first cap its bar from FATEs. If we entered the stable loop
+        // while XP was still climbing, we'd interrupt farming to train a chocobo that can't advance.
+        // (Reads CompanionInfo.CurrentXP vs LevelMaxXP.)
+        if (!ChocoboManager.XpMaxed())
+        {
+            if (EzThrottler.Throttle("AF_ChocoXpNotMax", 30_000))
+                Svc.Log.Information($"[Chocobo] XP not maxed ({ChocoboManager.CurrentXP()}/{ChocoboManager.MaxXP()}); keep farming before stabling.");
+            return false;
+        }
+
+        // We have onions, we're under target level, and XP is capped -> stable now.
         return true;
     }
 
@@ -563,49 +574,5 @@ public static unsafe class ChocoboStableRoutine
         if (terr == null) return false;
         var use = terr.Value.TerritoryIntendedUse.RowId;
         return use is 13 or 14 or 22 or 60 or 61;
-    }
-
-    // ---------------------------------------------------------------- self repair
-    /// <summary>
-    /// Drive self-repair: swap to crafter gearset, open repair window, repair all, swap back.
-    /// Uses throttles so repeated ticks don't spam.
-    /// </summary>
-    public static void RunSelfRepair(Configuration c)
-    {
-        if (ECommons.GenericHelpers.IsOccupied()) return;
-
-        // Equip crafter gearset first.
-        if (EzThrottler.Throttle("AF_RepairGearset", 4000))
-        {
-            RepairManager.EquipRepairGearset(c);
-            return;
-        }
-
-        // Open the repair window.
-        if (!RepairManager.RepairAddonReady())
-        {
-            if (EzThrottler.Throttle("AF_OpenRepair", 2000))
-                RepairManager.OpenRepairWindow();
-            return;
-        }
-
-        // Repair-all via the addon callback.
-        if (EzThrottler.Throttle("AF_RepairAll", 2000))
-        {
-            // Fire the "Repair All" button on the Repair addon (callback index 0 with confirm).
-            if (ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>("Repair", out var addon))
-            {
-                Callback.Fire(addon, true, 0);
-            }
-        }
-
-        // Confirm any yes/no dialog.
-        if (ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>("SelectYesno", out var yn))
-        {
-            if (EzThrottler.Throttle("AF_RepairConfirm", 1000))
-            {
-                Callback.Fire(yn, true, 0);
-            }
-        }
     }
 }

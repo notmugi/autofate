@@ -27,6 +27,18 @@ public static unsafe class GemstoneShopper
     public static bool ShopOpen()
         => ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>(ShopAddon, out var a) && a->IsVisible;
 
+    /// <summary>
+    /// Close the currency shop window — equivalent to pressing Escape. Calls the addon's Close()
+    /// (fire-callback + hide), which is exactly what the Escape key triggers for this addon.
+    /// </summary>
+    public static void CloseShop()
+    {
+        // Literally press Escape, exactly like a player would — same method that reliably closes
+        // the Repair window and other addons in this plugin.
+        try { ECommons.Automation.WindowsKeypress.SendKeypress(ECommons.Interop.LimitedKeys.Escape); }
+        catch (Exception e) { Svc.Log.Verbose($"[Gemstone] CloseShop (Escape) failed: {e.Message}"); }
+    }
+
     /// <summary>True if every enabled buy-list entry has met its target quantity.</summary>
     public static bool AllTargetsMet(Configuration c)
     {
@@ -57,9 +69,20 @@ public static unsafe class GemstoneShopper
     /// </summary>
     public static bool PurchaseTick(Configuration c)
     {
-        if (!ShopOpen()) return true; // shop not open; nothing to do here
+        // The "Exchange N gemstones for the following item?" confirmation is a SelectYesno — click
+        // Yes. Gate on IsAddonReady so we don't NRE on the button mid-open animation.
+        if (ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>("SelectYesno", out var yn)
+            && ECommons.GenericHelpers.IsAddonReady(yn))
+        {
+            if (EzThrottler.Throttle("AF_GemConfirm", 500))
+            {
+                try { new AddonMaster.SelectYesno((nint)yn).Yes(); }
+                catch (Exception e) { Svc.Log.Verbose($"[Gemstone] Confirm Yes failed (mid-transition): {e.Message}"); }
+            }
+            return false;
+        }
 
-        // If a confirm dialog is up, confirm it first.
+        // Legacy/alt confirm dialog (some currency shops use ShopExchangeCurrencyDialog).
         if (ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>(ShopDialog, out var dlg) && dlg->IsVisible)
         {
             if (EzThrottler.Throttle("AF_GemConfirm", 500))
@@ -70,12 +93,22 @@ public static unsafe class GemstoneShopper
             return false;
         }
 
-        if (!ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>(ShopAddon, out var addonPtr))
-            return false;
+        if (!ShopOpen()) return false; // shop not open yet (still loading / mid-interact) — wait, don't close
+
+        if (!ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>(ShopAddon, out var addonPtr)
+            || !ECommons.GenericHelpers.IsAddonReady(addonPtr))
+            return false; // addon not fully built — wait, don't treat as "done"
 
         var master = new AddonMaster.ShopExchangeCurrency((nint)addonPtr);
         var shopItems = master.BasicShopItems;
-        if (shopItems.Length == 0) return true; // nothing in this shop
+        // Shop just opened and its item list hasn't populated yet — DON'T return true (that would
+        // instantly close the window and re-loop). Give it a few frames to fill in.
+        if (shopItems.Length == 0)
+        {
+            if (EzThrottler.Throttle("AF_GemShopSettle", 3000))
+                Svc.Log.Verbose("[Gemstone] Shop open but item list empty; waiting for it to populate.");
+            return false;
+        }
 
         var gems = InventoryUtil.GetGemstoneCount();
 

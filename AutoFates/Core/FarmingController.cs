@@ -125,7 +125,13 @@ public sealed unsafe class FarmingController
         // In Shared FATEs mode, keep the in-game shared-fate tracker data loaded so zone
         // skip/stop logic has something to read.
         if (C.Mode == FarmingMode.SharedFates && (C.SharedFateSkipMaxed || C.StopWhenAllSharedFatesMaxed))
+        {
             Features.SharedFateTracker.EnsureData();
+            // Periodically re-open the Shared FATE window to repopulate stale per-zone data, but
+            // only while idle (not mid-fate) so we don't pop the window during combat.
+            if (State is FarmState.SelectingZone or FarmState.TravelingToZone)
+                Features.SharedFateTracker.RefreshData();
+        }
 
         // SYNC ASAP: if we're physically standing inside a running fate and not yet level-synced,
         // sync immediately — handles the case where the plugin is started while already in a fate.
@@ -452,26 +458,44 @@ public sealed unsafe class FarmingController
     private unsafe bool TryStartFateViaNpc(IFate fate)
     {
         // 1) If a Yes/No prompt is up, confirm it (this is the "Assist the guard?" start prompt).
+        //    Gate on IsAddonReady (NOT just IsVisible): during the open/close animation the addon
+        //    is visible but its YesButton pointer is still null, which NRE'd inside SelectYesno.Yes.
         if (ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>(
-                "SelectYesno", out var yn) && yn != null && yn->IsVisible)
+                "SelectYesno", out var yn) && ECommons.GenericHelpers.IsAddonReady(yn))
         {
             if (EzThrottler.Throttle("AF_FateYes", 600))
-                new ECommons.UIHelpers.AddonMasterImplementations.AddonMaster.SelectYesno((nint)yn).Yes();
+            {
+                try { new ECommons.UIHelpers.AddonMasterImplementations.AddonMaster.SelectYesno((nint)yn).Yes(); }
+                catch (Exception e) { Svc.Log.Verbose($"[Controller] FateYes failed (addon mid-transition): {e.Message}"); }
+            }
             return true;
         }
 
         // 2) If Talk dialogue is up, click through it.
         if (ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>(
-                "Talk", out var talk) && talk != null && talk->IsVisible)
+                "Talk", out var talk) && ECommons.GenericHelpers.IsAddonReady(talk))
         {
             if (EzThrottler.Throttle("AF_FateTalk", 250))
-                new ECommons.UIHelpers.AddonMasterImplementations.AddonMaster.Talk((nint)talk).Click();
+            {
+                try { new ECommons.UIHelpers.AddonMasterImplementations.AddonMaster.Talk((nint)talk).Click(); }
+                catch (Exception e) { Svc.Log.Verbose($"[Controller] FateTalk failed (addon mid-transition): {e.Message}"); }
+            }
             return true;
         }
 
         // 3) No dialogue open. Look for the fate-start NPC and interact with it.
         var npc = FateTargeting.FindFateStartNpc(_targetFateId);
         if (npc == null) return false; // nothing to start -> normal combat fate
+
+        // GROUNDED GUARD: land + dismount before targeting/interacting with the start NPC. We don't
+        // want to dive at the quest giver from the air or fire Interact while mounted.
+        if (Features.MountManager.IsMounted || Features.MountManager.IsFlying)
+        {
+            Navigator.Stop();
+            Features.MountManager.Dismount();
+            StatusText = $"Landing/dismounting before talking to {npc.Name}";
+            return true;
+        }
 
         // Walk to the NPC if out of interact range.
         var me = Player.Object;
@@ -502,6 +526,8 @@ public sealed unsafe class FarmingController
 
     private void SyncToFate()
     {
+        // Never sync while mounted/airborne — be fully grounded before doing anything in a fate.
+        if (Features.MountManager.IsMounted || Features.MountManager.IsFlying) return;
         if (!EzThrottler.Throttle("AF_FateSync", 1000)) return;
         try
         {
@@ -524,15 +550,38 @@ public sealed unsafe class FarmingController
             return;
         }
 
+        // GROUNDED GUARD (covers everything below: sync, NPC-start, collect, and combat). Be fully
+        // off the mount and on the ground before doing ANYTHING in a fate. Only exception is when a
+        // dialogue addon is already up — we still click through that so we don't get stuck.
+        if (Features.MountManager.IsMounted || Features.MountManager.IsFlying)
+        {
+            var dlgUp = ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>("Talk", out var td) && ECommons.GenericHelpers.IsAddonReady(td)
+                     || ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>("SelectYesno", out var yd) && ECommons.GenericHelpers.IsAddonReady(yd);
+            if (!dlgUp)
+            {
+                Navigator.Stop();
+                Features.MountManager.Dismount();
+                StatusText = $"Landing/dismounting before engaging: {fate.Name}";
+                return;
+            }
+        }
+
         var type = FateSelector.Classify(fate);
         StatusText = $"In fate: {fate.Name} ({type}) {fate.Progress}%";
 
-        // FATE-START NPC: ONLY defend/escort fates begin by talking to an NPC (orange "!"). For
-        // COLLECT fates the "!" NPC is the TURN-IN npc (handled inside HandleCollectFate), so we
-        // must NOT treat it as a start NPC or we loop re-opening the Item Request window.
-        if (type is FateType.Defend or FateType.Escort)
+        // FATE-START NPC: some fates (escort, and many "guard"/defend fates) only begin once you
+        // talk to a start NPC carrying the orange "!". Classification (Rule/icon) is unreliable and
+        // often tags these as Battle, so DON'T gate solely on type. Instead, trigger NPC-start for
+        // ANY non-Collect fate while it hasn't progressed and there are no fate enemies to fight yet
+        // — that's the unambiguous "waiting for you to start it" state. COLLECT fates are excluded
+        // because their "!" NPC is the turn-in npc (handled in HandleCollectFate).
+        if (type != FateType.Collect)
         {
-            if (TryStartFateViaNpc(fate)) return;
+            var notStarted = fate.Progress <= 0
+                             && FateTargeting.CountFateEnemies(_targetFateId) == 0;
+            var dialogueOpen = ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>("Talk", out var t) && ECommons.GenericHelpers.IsAddonReady(t)
+                            || ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>("SelectYesno", out var y) && ECommons.GenericHelpers.IsAddonReady(y);
+            if ((notStarted || dialogueOpen) && TryStartFateViaNpc(fate)) return;
         }
 
         // Keep ourselves inside the fate ring if we've drifted out. Don't do this when the combat
@@ -563,6 +612,17 @@ public sealed unsafe class FarmingController
     {
         var me = Player.Object;
         if (me == null) return;
+
+        // GROUNDED GUARD: never target / engage while mounted or in the air. The combat backend
+        // can't act while mounted, and targeting mid-flight makes us dive at mobs from above. Land
+        // and dismount FIRST, then bail this tick — we re-evaluate targeting once we're on foot.
+        if (Features.MountManager.IsMounted || Features.MountManager.IsFlying)
+        {
+            Navigator.Stop();
+            Features.MountManager.Dismount();
+            StatusText = $"Landing/dismounting before engaging: {fate.Name}";
+            return;
+        }
 
         // STICKY TARGET (every 1s): keep us on an ENEMY, never a friendly.
         //  - If we're already targeting a live ENEMY  -> leave it alone (don't yank mid-cast).
@@ -642,24 +702,30 @@ public sealed unsafe class FarmingController
         }
 
         // MASS PULL: if enabled and we don't yet have a healthy pile gathered on us, go grab more.
-        // Rule: we want at least MassPullCount (5) fate enemies within MassPullGatherRange (2y) of
-        // us. While under that, walk to the nearest UNgathered enemy to body-pull it into the pile.
+        // Rule: we want at least wantCount fate enemies within gatherRange of us. While under that,
+        // walk to the nearest UNgathered enemy to body-pull it into the pile — but only if it's
+        // within leashRange (4y). We DON'T sprint across the whole fate chasing lone stragglers:
+        // once the nearest ungathered enemy is beyond the leash, we stop and fight what we have.
         if (C.MassPull && !ECommons.GenericHelpers.IsOccupied())
         {
             const int wantCount = 5;
             const float gatherRange = 2f;
+            const float leashRange = 20f;       // how far we'll walk to body-pull a straggler
+            const float noSwapRange = 10f;      // keep current target if it's a valid enemy within this range
             var gathered = FateTargeting.CountFateEnemiesWithin(_targetFateId, gatherRange);
             if (gathered < wantCount)
             {
-                var pull = FateTargeting.GetNearestUngatheredEnemy(_targetFateId, gatherRange);
+                var pull = FateTargeting.GetNearestUngatheredEnemy(_targetFateId, gatherRange, leashRange);
                 if (pull != null)
                 {
                     // IMPORTANT for casters/ranged: do NOT yank the target while we're mid-cast —
-                    // changing target cancels the cast. Only (re)target the pull mob when we're not
-                    // casting AND our current target isn't already a valid fate enemy. This lets the
-                    // rotation land casts on whatever it's on while we walk the pile together.
+                    // changing target cancels the cast. Also don't auto-swap when our current target
+                    // is a valid fate enemy within noSwapRange (10y) — let the rotation keep working
+                    // it instead of constantly flipping targets among the pile.
                     var meCasting = Player.Object is { IsCasting: true };
-                    var curValid = Svc.Targets.Target is IBattleNpc cc && FateTargeting.IsAttackableEnemy(cc);
+                    var curValid = Svc.Targets.Target is IBattleNpc cc
+                        && FateTargeting.IsAttackableEnemy(cc)
+                        && Vector3.Distance(me.Position, cc.Position) <= noSwapRange;
                     if (!meCasting && !curValid)
                         Svc.Targets.Target = pull;
 
@@ -839,6 +905,12 @@ public sealed unsafe class FarmingController
         Navigator.Stop();
         _yieldUntilMs = 0; // clear the smart-mix yield latch
 
+        // In Shared FATEs mode, re-open the Shared FATE window now to repopulate the per-zone
+        // progress that just changed from completing this fate, then close it. force:true bypasses
+        // the interval throttle so every completed fate refreshes the data.
+        if (C.Mode == FarmingMode.SharedFates)
+            Features.SharedFateTracker.RefreshData(force: true);
+
         // Per-zone counters (manual mode quota).
         var terr = Svc.ClientState.TerritoryType;
         _zoneFatesDone.TryGetValue(terr, out var done);
@@ -874,6 +946,15 @@ public sealed unsafe class FarmingController
     /// <summary>Kill any stray hostiles until we're out of combat, then resume fate selection.</summary>
     private void TickClearingAggro()
     {
+        // GROUNDED GUARD: land + dismount before targeting/engaging stray aggro.
+        if (Features.MountManager.IsMounted || Features.MountManager.IsFlying)
+        {
+            Navigator.Stop();
+            Features.MountManager.Dismount();
+            StatusText = "Landing/dismounting before clearing aggro";
+            return;
+        }
+
         // Primary: enemies targeting us OR our chocobo. Secondary: anything hostile while still
         // flagged in combat. Done when both are clear.
         var attackers = FateTargeting.GetEnemiesAttackingMe();
@@ -986,7 +1067,7 @@ public sealed unsafe class FarmingController
             return;
         }
 
-        // Self-repair flow.
+        // Self-repair flow (no crafter gearset needed — dark matter repairs any gear on any class).
         if (C.RepairMode == RepairMode.SelfRepair)
         {
             if (!RepairManager.CanSelfRepair())
@@ -994,9 +1075,8 @@ public sealed unsafe class FarmingController
                 Stop(StopReason.OutOfDarkMatter);
                 return;
             }
-            ChocoboStableRoutine.RunSelfRepair(C);
-            // RunSelfRepair drives a TaskManager; when durability recovers we exit.
-            if (!RepairManager.NeedsRepair(C))
+            // RunSelfRepair returns true once everything is repaired AND the window is closed.
+            if (RepairManager.RunSelfRepair(C))
                 State = FarmState.SelectingZone;
             return;
         }
@@ -1020,7 +1100,7 @@ public sealed unsafe class FarmingController
         }
     }
 
-    private void TickGemstoneShopping()
+    private unsafe void TickGemstoneShopping()
     {
         StatusText = "Gemstone shopping";
 
@@ -1029,20 +1109,102 @@ public sealed unsafe class FarmingController
         {
             if (GemstoneShopper.PurchaseTick(C))
             {
-                // Close the shop and resume.
+                // Done buying — close the shop window (same as hitting Escape) before resuming.
                 if (EzThrottler.Throttle("AF_CloseShop", 500))
-                    ECommons.Automation.Chat.ExecuteCommand("/automove off"); // no-op safety
+                    GemstoneShopper.CloseShop();
                 State = FarmState.SelectingZone;
             }
             return;
         }
 
-        // Reaching the vendor automatically is a tuning follow-up (requires vendor NPC location).
-        // For now, if the shop isn't open and we can't open it, warn and resume.
-        if (EzThrottler.Throttle("AF_GemVendorNav", 30000))
-            Svc.Chat.Print("[AutoFates] Open the bicolor gemstone vendor to auto-purchase your buy list.");
+        // Interacting with the vendor often pops Talk dialogue (greeting) BEFORE the shop addon
+        // opens — spam-click through it so we reach the menu. Gate on IsAddonReady to avoid NREs.
+        if (ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>("Talk", out var gtalk)
+            && ECommons.GenericHelpers.IsAddonReady(gtalk))
+        {
+            if (EzThrottler.Throttle("AF_GemTalk", 200))
+            {
+                try { new ECommons.UIHelpers.AddonMasterImplementations.AddonMaster.Talk((nint)gtalk).Click(); }
+                catch (Exception e) { Svc.Log.Verbose($"[Gemstone] Talk click failed: {e.Message}"); }
+            }
+            return;
+        }
 
-        if (!GemstoneShopper.ShouldShop(C))
-            State = FarmState.SelectingZone;
+        // No captured vendor location -> we can't auto-travel. Tell the user how to set it once.
+        if (!C.VendorPositionSet)
+        {
+            if (EzThrottler.Throttle("AF_GemNoVendor", 30000))
+                Svc.Chat.Print("[AutoFates] Open the gemstone vendor and click 'Add' on an item in the Gemstone tab to capture its location for auto-travel.");
+            if (!GemstoneShopper.ShouldShop(C)) State = FarmState.SelectingZone;
+            return;
+        }
+
+        // STEP 1: teleport to the vendor's zone (nearest aetheryte) if we're not there yet.
+        if (Svc.ClientState.TerritoryType != C.VendorTerritory)
+        {
+            StatusText = $"Traveling to gemstone vendor in {Data.Zones.GetTerritoryName(C.VendorTerritory)}";
+            Teleporter.TravelToTerritory(C, C.VendorTerritory);
+            return;
+        }
+
+        // STEP 2: in the vendor's zone — dismount, then navigate to the vendor and interact.
+        var me = Player.Object;
+        if (me == null) return;
+
+        // Find the live vendor NPC (by captured DataId) so we interact with the exact object;
+        // fall back to the captured position if the NPC isn't loaded yet.
+        var vendor = FindGemstoneVendor();
+        var dest = vendor?.Position ?? C.VendorPosition;
+        var dist = Vector3.Distance(me.Position, dest);
+
+        if (dist > 4f)
+        {
+            StatusText = $"Navigating to {(string.IsNullOrEmpty(C.VendorName) ? "gemstone vendor" : C.VendorName)}";
+            Navigator.MoveTo(C, dest, 3f);
+            return;
+        }
+
+        // In range — dismount before interacting.
+        Navigator.Stop();
+        if (Features.MountManager.IsMounted || Features.MountManager.IsFlying)
+        {
+            Features.MountManager.Dismount();
+            return;
+        }
+
+        if (vendor == null)
+        {
+            // We're at the captured spot but the NPC isn't found (moved patch / wrong capture).
+            if (EzThrottler.Throttle("AF_GemVendorMissing", 15000))
+                Svc.Chat.PrintError("[AutoFates] Reached the vendor spot but couldn't find the vendor NPC. Re-capture it in the Gemstone tab.");
+            return;
+        }
+
+        if (Player.IsAnimationLocked || !Player.Interactable) return;
+        if (Svc.Targets.Target?.GameObjectId != vendor.GameObjectId)
+            Svc.Targets.Target = vendor;
+        if (EzThrottler.Throttle("AF_GemInteract", 1500))
+        {
+            StatusText = $"Opening shop: {vendor.Name}";
+            FFXIVClientStructs.FFXIV.Client.Game.Control.TargetSystem.Instance()
+                ->InteractWithObject(((FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)vendor.Address), false);
+        }
+    }
+
+    /// <summary>Find the captured gemstone vendor NPC nearby (by BaseId/DataId), or null.</summary>
+    private Dalamud.Game.ClientState.Objects.Types.IGameObject? FindGemstoneVendor()
+    {
+        if (C.VendorDataId == 0) return null;
+        var me = Player.Object;
+        if (me == null) return null;
+        Dalamud.Game.ClientState.Objects.Types.IGameObject? best = null;
+        var bestSq = float.MaxValue;
+        foreach (var o in Svc.Objects)
+        {
+            if (o.BaseId != C.VendorDataId) continue;
+            var d = Vector3.DistanceSquared(me.Position, o.Position);
+            if (d < bestSq) { bestSq = d; best = o; }
+        }
+        return best;
     }
 }

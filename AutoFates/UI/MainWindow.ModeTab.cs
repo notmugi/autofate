@@ -154,15 +154,14 @@ public sealed partial class MainWindow
             .ToList();
         ImGui.TextDisabled($"{data.Count(z => z.IsMaxed)}/{data.Count} selected zones maxed.");
 
-        using (var tbl = ImRaii.Table("##sftracker", 4, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY,
+        using (var tbl = ImRaii.Table("##sftracker", 3, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY,
                    new System.Numerics.Vector2(0, 320)))
         {
             if (tbl)
             {
                 ImGui.TableSetupColumn("Zone", ImGuiTableColumnFlags.WidthStretch);
                 ImGui.TableSetupColumn("Rank", ImGuiTableColumnFlags.WidthFixed, 70);
-                ImGui.TableSetupColumn("Progress", ImGuiTableColumnFlags.WidthFixed, 90);
-                ImGui.TableSetupColumn("Need", ImGuiTableColumnFlags.WidthFixed, 60);
+                ImGui.TableSetupColumn("Fates", ImGuiTableColumnFlags.WidthFixed, 70);
                 ImGui.TableHeadersRow();
                 foreach (var z in data)
                 {
@@ -175,9 +174,13 @@ public sealed partial class MainWindow
                     ImGui.TableNextColumn();
                     ImGui.TextUnformatted($"{z.CurrentRank}/{z.MaxRank}");
                     ImGui.TableNextColumn();
-                    ImGui.TextUnformatted($"{z.FateProgress}%");
-                    ImGui.TableNextColumn();
-                    ImGui.TextUnformatted(z.IsMaxed ? "-" : $"{z.NeededFates}");
+                    // Fates done vs. the CURRENT rank's requirement. The requirement varies by rank
+                    // and expansion (ShB/EW: 6 then 60; DT: 6, 20, 40 — see consolegameswiki), so we
+                    // derive it as done + needed rather than hardcoding 60.
+                    if (z.IsMaxed)
+                        ImGui.TextUnformatted($"{z.FateProgress}/{z.FateProgress}");
+                    else
+                        ImGui.TextUnformatted($"{z.FateProgress}/{z.FateProgress + z.NeededFates}");
                 }
             }
         }

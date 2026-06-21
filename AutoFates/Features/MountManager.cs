@@ -16,6 +16,7 @@ namespace AutoFates.Features;
 public static unsafe class MountManager
 {
     private const uint MountRouletteGeneralAction = 9; // "Mount Roulette" general action
+    private const uint SprintGeneralAction = 4;        // "Sprint" general action (full-duration in sanctuaries)
     private const int FlyJumpThrottleMs = 400;
 
     public static bool IsMounted => Player.Mounted;
@@ -41,6 +42,41 @@ public static unsafe class MountManager
             }
             catch { return false; }
         }
+    }
+
+    /// <summary>True if Sprint (or the sanctuary speed buff, status 50) is currently active.</summary>
+    public static bool IsSprinting
+    {
+        get
+        {
+            try
+            {
+                var me = Player.Object as Dalamud.Game.ClientState.Objects.Types.IBattleChara;
+                if (me == null) return false;
+                foreach (var s in me.StatusList)
+                    if (s.StatusId is 50 or 1199) return true; // 50 = Sprint, 1199 = Peloton (party sprint)
+                return false;
+            }
+            catch { return false; }
+        }
+    }
+
+    /// <summary>
+    /// Use the Sprint general action (id 4). In towns/sanctuaries this grants a long-duration speed
+    /// boost; elsewhere it's the short combat sprint. Throttled and skipped if already sprinting.
+    /// </summary>
+    public static bool Sprint()
+    {
+        if (IsSprinting) return true;
+        if (IsMounted) return false; // sprint doesn't apply while mounted
+        if (ECommons.GenericHelpers.IsOccupied()) return false;
+        if (!EzThrottler.Throttle("AF_Sprint", 3000)) return false;
+        try
+        {
+            ActionManager.Instance()->UseAction(ActionType.GeneralAction, SprintGeneralAction);
+            return true;
+        }
+        catch (Exception e) { Svc.Log.Verbose($"[Mount] Sprint failed: {e.Message}"); return false; }
     }
 
     public static bool CanFlyHere => Player.CanFly;

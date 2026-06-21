@@ -26,11 +26,7 @@ public sealed partial class MainWindow
 
         if (C.RepairMode == RepairMode.SelfRepair)
         {
-            var gs = C.RepairGearsetNumber;
-            if (ImGui.InputInt("Crafter gearset number", ref gs)) { C.RepairGearsetNumber = Math.Clamp(gs, 1, 100); Save(); }
-            ImGui.SameLine(); Help("AutoFates swaps to this gearset to self-repair (it needs the right craftsmanship/control stats), then swaps back.");
-
-            ImGui.Spacing();
+            ImGui.TextDisabled("Self-repair uses Dark Matter directly — no crafter gearset required.");
             var dm = Features.InventoryUtil.GetBestDarkMatter();
             if (dm != 0) ImGui.TextDisabled("Dark Matter available.");
             else ImGuiEx.Text(new System.Numerics.Vector4(0.9f, 0.5f, 0.2f, 1f), "No Dark Matter! Farming will stop if repair is needed.");

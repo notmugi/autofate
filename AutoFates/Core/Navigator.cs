@@ -71,6 +71,11 @@ public static class Navigator
             return false;
         }
 
+        // SPRINT: whenever we're travelling on foot (not mounted) and Sprint is off cooldown, pop it.
+        // Cheap to call (no-ops if already sprinting / occupied / mounted) and speeds up every hop.
+        if (!MountManager.IsMounted)
+            MountManager.Sprint();
+
         // Hand the destination to vnavmesh if it isn't already pathing there.
         // We pass fly=true and let vnavmesh perform the takeoff itself — we do NOT manually jump
         // here (that caused the endless-jumping bug by fighting vnavmesh's own takeoff).

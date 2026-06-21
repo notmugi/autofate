@@ -76,6 +76,37 @@ public static unsafe class ChocoboManager
         catch { return 0; }
     }
 
+    /// <summary>
+    /// XP required to fill the chocobo's CURRENT rank (the bar's max for this level). CompanionInfo
+    /// only exposes CurrentXP, not the cap — the cap lives in the BuddyRank Excel sheet, keyed by
+    /// rank (RowId), in its ExpRequired column.
+    /// </summary>
+    public static uint MaxXP()
+    {
+        try
+        {
+            var rank = (uint)Rank();
+            if (rank == 0) return 0;
+            var sheet = Svc.Data.GetExcelSheet<Lumina.Excel.Sheets.BuddyRank>();
+            var row = sheet?.GetRowOrDefault(rank);
+            return row?.ExpRequired ?? 0;
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>
+    /// True when the chocobo's XP bar is full for its current rank, i.e. it can advance and is
+    /// waiting to be stabled+trained to unlock the next tier. We only run the stable/training loop
+    /// once XP is actually capped — otherwise we'd interrupt farming to stable a chocobo that still
+    /// needs to earn XP from FATEs first.
+    /// </summary>
+    public static bool XpMaxed()
+    {
+        var max = MaxXP();
+        if (max == 0) return false; // unknown / not summoned — don't trigger stabling
+        return CurrentXP() >= max;
+    }
+
     /// <summary>The currently active stance command (game value).</summary>
     public static byte ActiveCommand()
     {
