@@ -620,9 +620,9 @@ public sealed unsafe class FarmingController
 
         _targetFateId = 0;
 
-        // If we accidentally pulled stray (non-fate) enemies that are still beating on us, clear
-        // them before moving on so we don't get stuck unable to leave.
-        if (FateTargeting.GetEnemiesAttackingMe().Count > 0)
+        // If we're still in combat (we pulled stray non-fate enemies — possibly hitting our chocobo
+        // rather than us), clear them before moving on so we don't get stuck.
+        if (InCombat())
         {
             State = FarmState.ClearingAggro;
             return;
@@ -631,21 +631,41 @@ public sealed unsafe class FarmingController
         State = FarmState.SelectingFate;
     }
 
-    /// <summary>Kill any stray enemies attacking us, then resume fate selection.</summary>
+    /// <summary>True if the player is flagged in combat.</summary>
+    private static bool InCombat()
+    {
+        var me = Player.Object;
+        return me != null
+            && (me.StatusFlags & Dalamud.Game.ClientState.Objects.Enums.StatusFlags.InCombat) != 0;
+    }
+
+    /// <summary>Kill any stray hostiles until we're out of combat, then resume fate selection.</summary>
     private void TickClearingAggro()
     {
-        var attacker = FateTargeting.EnsureAttackerTarget();
-        if (attacker == null)
+        // Done when we're no longer in combat AND nothing hostile is on us.
+        var hostile = FateTargeting.GetNearestHostile();
+        if (!InCombat() && hostile == null)
         {
-            // All clear -> back to farming.
             Navigator.Stop();
             IPCManager.StopCombat(C);
             State = FarmState.SelectingFate;
             return;
         }
 
+        if (hostile == null)
+        {
+            // In combat but nothing nearby (e.g. mob running back) — just wait briefly.
+            Navigator.Stop();
+            return;
+        }
+
+        // Make sure we're targeting a hostile (prefer one attacking us, else nearest hostile).
+        var attacker = FateTargeting.EnsureAttackerTarget() ?? hostile;
+        if (!(Svc.Targets.Target is IBattleNpc cur && FateTargeting.IsAttackableEnemy(cur)))
+            Svc.Targets.Target = attacker;
+
         StatusText = $"Clearing stray aggro: {attacker.Name}";
-        IPCManager.StartCombat(C); // make the rotation backend fight the attacker
+        IPCManager.StartCombat(C); // make the rotation backend fight it
 
         // Walk into range if the backend isn't moving us.
         var me = Player.Object;

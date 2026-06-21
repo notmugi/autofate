@@ -173,6 +173,27 @@ public static unsafe class FateTargeting
         return result;
     }
 
+    /// <summary>
+    /// Nearest attackable hostile within range, regardless of who it's targeting. Used to clear
+    /// stray aggro after a fate (the mob may be hitting our chocobo, not us, so "attacking me"
+    /// detection misses it). Nearest-first.
+    /// </summary>
+    public static IBattleNpc? GetNearestHostile(float maxRange = 40f)
+    {
+        var me = Player.Object;
+        if (me == null) return null;
+        IBattleNpc? best = null;
+        var bestSq = maxRange * maxRange;
+        foreach (var obj in Svc.Objects)
+        {
+            if (obj is not IBattleNpc bnpc) continue;
+            if (!IsAttackableEnemy(bnpc)) continue;
+            var d = Vector3.DistanceSquared(me.Position, bnpc.Position);
+            if (d <= bestSq) { bestSq = d; best = bnpc; }
+        }
+        return best;
+    }
+
     /// <summary>Ensure we're targeting the nearest enemy attacking us. Returns it, or null if none.</summary>
     public static IBattleNpc? EnsureAttackerTarget()
     {
