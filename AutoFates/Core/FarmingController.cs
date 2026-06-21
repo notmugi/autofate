@@ -763,29 +763,28 @@ public sealed unsafe class FarmingController
         // movement is handed back in case a previous non-BMR path left it forbidden.
         if (BmrMovementActive())
         {
-            IPCManager.SetBmrMovement(true); // ensure BMR can move/dodge (no-op if already allowed)
-
             if (target == null) return; // BMR will reposition; nothing to target yet
 
-            // Mass-pull: prefer targeting an un-aggroed mob in range so the rotation pulls more.
-            if (C.MassPull)
-            {
-                var aggroed = FateTargeting.CountAggroedFateEnemies(_targetFateId, C.MassPullRange + 5f);
-                if (aggroed < C.MassPullMaxPile)
-                {
-                    var pull = FateTargeting.GetNearestUnaggroedFateEnemy(_targetFateId, C.MassPullRange);
-                    if (pull != null && Player.Object is not { IsCasting: true })
-                    {
-                        Svc.Targets.Target = pull;
-                        return;
-                    }
-                }
-            }
-            // Otherwise keep the chosen fate target; BMR handles the rest.
-            if (Svc.Targets.Target is not IBattleNpc cur || !FateTargeting.IsFateEnemy(cur, _targetFateId))
+            if (Player.Object is not { IsCasting: true }
+                && (Svc.Targets.Target is not IBattleNpc bc || bc.GameObjectId != target.GameObjectId))
                 Svc.Targets.Target = target;
-            // Force-open combat ourselves so we don't stand idle waiting to be hit.
-            FateTargeting.StartAutoAttack(Svc.Targets.Target as IBattleNpc ?? target);
+
+            // BMR won't CHASE a fate enemy that isn't aggroed onto us yet — it only dodges and
+            // fights what's already engaged. So when the target is out of engage range, WE vnav
+            // toward it (taking movement from BMR); once in range we hand movement back to BMR so it
+            // can resume AOE dodging. This is the "navigate to the closest enemy at any range" fix.
+            var bmrDist = Vector3.Distance(me.Position, target.Position);
+            var bmrEngage = Math.Max(2.5f, target.HitboxRadius + 2.5f);
+            if (bmrDist > bmrEngage && !ECommons.GenericHelpers.IsOccupied())
+            {
+                IPCManager.SetBmrMovement(false);      // take movement so vnav can path to the mob
+                Navigator.MoveTo(C, target.Position, bmrEngage, allowMount: false);
+            }
+            else
+            {
+                IPCManager.SetBmrMovement(true);       // in range -> hand back so BMR dodges/fights
+                FateTargeting.StartAutoAttack(target); // open combat so the backend engages
+            }
             return;
         }
 
@@ -802,30 +801,6 @@ public sealed unsafe class FarmingController
 
         // --- Below here BMR does NOT own movement (we returned above if it did). We drive movement
         // ourselves via vnav. ---
-
-        // MASS PULL (AutoDuty KillInRange model): while under the pile cap and there's an un-aggroed
-        // fate enemy within range, walk to it to body-pull it; once capped (or nothing left nearby),
-        // fall through to the standard engage-walk.
-        if (C.MassPull && !ECommons.GenericHelpers.IsOccupied())
-        {
-            var aggroed = FateTargeting.CountAggroedFateEnemies(_targetFateId, C.MassPullRange + 5f);
-            if (aggroed < C.MassPullMaxPile)
-            {
-                var pull = FateTargeting.GetNearestUnaggroedFateEnemy(_targetFateId, C.MassPullRange);
-                if (pull != null)
-                {
-                    if (Player.Object is not { IsCasting: true })
-                        Svc.Targets.Target = pull;
-                    if (Vector3.Distance(me.Position, pull.Position) > 1.5f)
-                        Navigator.MoveTo(C, pull.Position, 1.2f, allowMount: false);
-                    else
-                        Navigator.Stop();
-                    return;
-                }
-                // Nothing un-aggroed within pull radius -> fall through to engage the actual target
-                // (which may be beyond pull range). Mass pull only ADDS nearby-grabbing.
-            }
-        }
 
         // Walk into melee/casting range of the target so the rotation backend (Wrath/RSR) can attack.
         var dist = Vector3.Distance(me.Position, target.Position);
