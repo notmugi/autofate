@@ -439,6 +439,65 @@ public sealed unsafe class FarmingController
     /// <summary>True if we're physically standing inside any currently-running fate's ring.</summary>
     private static bool IsInsideAnyRunningFate() => FateSelector.GetCurrentFate() != null;
 
+    // Tracks the fate-start NPC interaction so we don't spam-interact while dialogue is up.
+    private long _fateNpcInteractedMs;
+
+    /// <summary>
+    /// Some fates require talking to a start NPC (orange "!") to begin: it pops Talk dialogue we
+    /// click through, then a Yes/No to start. Returns true while we're handling that (caller should
+    /// return and let it finish). Reuses ECommons addon helpers (Talk.Click / SelectYesno.Yes).
+    /// </summary>
+    private unsafe bool TryStartFateViaNpc(IFate fate)
+    {
+        // 1) If a Yes/No prompt is up, confirm it (this is the "Assist the guard?" start prompt).
+        if (ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>(
+                "SelectYesno", out var yn) && yn != null && yn->IsVisible)
+        {
+            if (EzThrottler.Throttle("AF_FateYes", 600))
+                new ECommons.UIHelpers.AddonMasterImplementations.AddonMaster.SelectYesno((nint)yn).Yes();
+            return true;
+        }
+
+        // 2) If Talk dialogue is up, click through it.
+        if (ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>(
+                "Talk", out var talk) && talk != null && talk->IsVisible)
+        {
+            if (EzThrottler.Throttle("AF_FateTalk", 250))
+                new ECommons.UIHelpers.AddonMasterImplementations.AddonMaster.Talk((nint)talk).Click();
+            return true;
+        }
+
+        // 3) No dialogue open. Look for the fate-start NPC and interact with it.
+        var npc = FateTargeting.FindFateStartNpc(_targetFateId);
+        if (npc == null) return false; // nothing to start -> normal combat fate
+
+        // Walk to the NPC if out of interact range.
+        var me = Player.Object;
+        if (me == null) return false;
+        var dist = Vector3.Distance(me.Position, npc.Position);
+        if (dist > 4f)
+        {
+            if (!ECommons.GenericHelpers.IsOccupied())
+                Navigator.MoveTo(C, npc.Position, 3f, allowMount: false);
+            StatusText = $"Approaching fate NPC: {npc.Name}";
+            return true;
+        }
+
+        // In range: target + interact (throttled).
+        Navigator.Stop();
+        if (Player.IsAnimationLocked || !Player.Interactable) return true;
+        if (Svc.Targets.Target?.GameObjectId != npc.GameObjectId)
+            Svc.Targets.Target = npc;
+        if (EzThrottler.Throttle("AF_FateInteract", 1500))
+        {
+            StatusText = $"Starting fate via NPC: {npc.Name}";
+            FFXIVClientStructs.FFXIV.Client.Game.Control.TargetSystem.Instance()
+                ->InteractWithObject(((FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)npc.Address), false);
+            _fateNpcInteractedMs = Environment.TickCount64;
+        }
+        return true;
+    }
+
     private void SyncToFate()
     {
         if (!EzThrottler.Throttle("AF_FateSync", 1000)) return;
@@ -465,6 +524,10 @@ public sealed unsafe class FarmingController
 
         var type = FateSelector.Classify(fate);
         StatusText = $"In fate: {fate.Name} ({type}) {fate.Progress}%";
+
+        // FATE-START NPC: some fates (defend/escort) must be started by talking to an NPC (the
+        // orange "!"). Handle the dialogue + Yes/No before anything else.
+        if (TryStartFateViaNpc(fate)) return;
 
         // Keep ourselves inside the fate ring if we've drifted out. Don't do this when the combat
         // backend (BMR AI) is driving movement, and never re-mount for these short hops.
@@ -572,10 +635,39 @@ public sealed unsafe class FarmingController
             return;
         }
 
+        // MASS PULL: if enabled and we don't yet have a healthy pile gathered on us, go grab more.
+        // Rule: we want at least MassPullCount (5) fate enemies within MassPullGatherRange (2y) of
+        // us. While under that, walk to the nearest UNgathered enemy to body-pull it into the pile.
+        if (C.MassPull && !ECommons.GenericHelpers.IsOccupied())
+        {
+            const int wantCount = 5;
+            const float gatherRange = 2f;
+            var gathered = FateTargeting.CountFateEnemiesWithin(_targetFateId, gatherRange);
+            if (gathered < wantCount)
+            {
+                var pull = FateTargeting.GetNearestUngatheredEnemy(_targetFateId, gatherRange);
+                if (pull != null)
+                {
+                    // Target it (so the backend tags it) and walk onto it to pull it in.
+                    if (Svc.Targets.Target is not IBattleNpc c2 || c2.GameObjectId != pull.GameObjectId)
+                        Svc.Targets.Target = pull;
+                    if (Vector3.Distance(me.Position, pull.Position) > 1.5f)
+                        Navigator.MoveTo(C, pull.Position, 1.2f, allowMount: false);
+                    else
+                        Navigator.Stop();
+                    return;
+                }
+                // Nothing left ungathered (all enemies already on us, just not 5 of them) -> fight.
+            }
+            // We have a full enough pile -> stop running, let the backend AoE them down.
+            Navigator.Stop();
+            return;
+        }
+
         // Walk into melee/casting range of the target so the rotation backend (Wrath / RSR / BMR)
-        // can attack. Mass-pull tightens the range so we body-pull multiple fate mobs en route.
+        // can attack.
         var dist = Vector3.Distance(me.Position, target.Position);
-        var engageRange = C.MassPull ? 2.5f : Math.Max(2.5f, target.HitboxRadius + 2.5f);
+        var engageRange = Math.Max(2.5f, target.HitboxRadius + 2.5f);
         if (dist > engageRange && !ECommons.GenericHelpers.IsOccupied())
             Navigator.MoveTo(C, target.Position, engageRange, allowMount: false);
         else

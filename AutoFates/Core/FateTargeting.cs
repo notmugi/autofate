@@ -20,6 +20,38 @@ public static unsafe class FateTargeting
         return ((CSGameObject*)obj.Address)->FateId;
     }
 
+    /// <summary>Read the nameplate icon id (0 = none). The fate-start NPC carries the FATE "!" icon.</summary>
+    public static uint GetNameplateIcon(IGameObject obj)
+    {
+        if (obj.Address == nint.Zero) return 0;
+        return ((CSGameObject*)obj.Address)->NamePlateIconId;
+    }
+
+    /// <summary>
+    /// Find the fate-START NPC for a fate (the one you interact with to begin a defend/escort fate
+    /// — pops Talk dialogue then a Yes/No). Heuristic: an interactable, NON-enemy object carrying
+    /// this FateId with a nameplate icon (the orange "!"). Returns the nearest match, or null.
+    /// </summary>
+    public static IGameObject? FindFateStartNpc(ushort fateId)
+    {
+        if (fateId == 0) return null;
+        var me = Player.Object;
+        if (me == null) return null;
+        IGameObject? best = null;
+        var bestSq = float.MaxValue;
+        foreach (var obj in Svc.Objects)
+        {
+            if (!obj.IsTargetable) continue;
+            if (GetFateId(obj) != fateId) continue;
+            // Must NOT be an attackable enemy, and must show a nameplate icon (the fate "!").
+            if (obj is IBattleNpc bnpc && IsAttackableEnemy(bnpc)) continue;
+            if (GetNameplateIcon(obj) == 0) continue;
+            var d = Vector3.DistanceSquared(me.Position, obj.Position);
+            if (d < bestSq) { bestSq = d; best = obj; }
+        }
+        return best;
+    }
+
     /// <summary>
     /// True if this object is a live enemy belonging to the given fate. We match on the FateId
     /// field directly: only mobs that count toward this fate carry its id, so this never selects
@@ -148,6 +180,34 @@ public static unsafe class FateTargeting
     }
 
     public static int CountFateEnemies(ushort fateId) => GetFateEnemies(fateId).Count;
+
+    /// <summary>Count live fate enemies within <paramref name="range"/> yalms of the player.</summary>
+    public static int CountFateEnemiesWithin(ushort fateId, float range)
+    {
+        var me = Player.Object;
+        if (me == null) return 0;
+        var n = 0;
+        var rSq = range * range;
+        foreach (var e in GetFateEnemies(fateId))
+            if (Vector3.DistanceSquared(me.Position, e.Position) <= rSq) n++;
+        return n;
+    }
+
+    /// <summary>
+    /// Mass-pull target picker: the nearest fate enemy that is NOT already gathered up on us (i.e.
+    /// further than <paramref name="gatheredRange"/>), so we can walk over and body-pull it into
+    /// the pile. Returns null if every fate enemy is already gathered (or none exist).
+    /// </summary>
+    public static IBattleNpc? GetNearestUngatheredEnemy(ushort fateId, float gatheredRange)
+    {
+        var me = Player.Object;
+        if (me == null) return null;
+        var gSq = gatheredRange * gatheredRange;
+        foreach (var e in GetFateEnemies(fateId)) // nearest-first
+            if (Vector3.DistanceSquared(me.Position, e.Position) > gSq)
+                return e;
+        return null;
+    }
 
     /// <summary>
     /// Enemies that are currently attacking us (in combat, targeting the player), regardless of
