@@ -214,6 +214,34 @@ public static unsafe class FateTargeting
     /// whether they belong to a fate. Used to clean up accidental pulls before moving on so we're
     /// not stuck being beaten on by a stray mob. Nearest-first.
     /// </summary>
+    /// <summary>
+    /// Ground collectables for a collect fate (e.g. "Fallen Lumber"): interactable EventObj objects
+    /// carrying this FateId. Nearest-first.
+    /// </summary>
+    public static IGameObject? GetNearestCollectable(ushort fateId)
+    {
+        if (fateId == 0) return null;
+        var me = Player.Object;
+        if (me == null) return null;
+        IGameObject? best = null;
+        var bestSq = float.MaxValue;
+        foreach (var obj in Svc.Objects)
+        {
+            if (obj.ObjectKind != Dalamud.Game.ClientState.Objects.Enums.ObjectKind.EventObj) continue;
+            if (!obj.IsTargetable) continue;
+            if (GetFateId(obj) != fateId) continue;
+            var d = Vector3.DistanceSquared(me.Position, obj.Position);
+            if (d < bestSq) { bestSq = d; best = obj; }
+        }
+        return best;
+    }
+
+    /// <summary>
+    /// The turn-in NPC for a collect fate: a non-enemy object with this FateId carrying a nameplate
+    /// icon. (Same detection as the start NPC, but used for collect hand-ins.)
+    /// </summary>
+    public static IGameObject? GetCollectTurnInNpc(ushort fateId) => FindFateStartNpc(fateId);
+
     /// <summary>Our chocobo companion's object id (object whose OwnerId == our id), or 0.</summary>
     public static ulong GetChocoboId()
     {

@@ -41,6 +41,8 @@ public sealed unsafe class FarmingController
     // Collect-fate hand-in math.
     private int _collectTurnedIn;
     private int _collectEstimatedNeeded;
+    private int _collectProgressBeforeTurnIn = -1; // fate.Progress sampled before a hand-in, to learn per-turnin value
+    private int _collectPerItemProgress;           // learned: progress % gained per item turned in
 
     // Smart-mix yield latch: when BMR takes over for a dodge we keep yielding until danger has
     // been fully clear for this settle window, so vnav and BMR don't fight for control.
@@ -525,9 +527,13 @@ public sealed unsafe class FarmingController
         var type = FateSelector.Classify(fate);
         StatusText = $"In fate: {fate.Name} ({type}) {fate.Progress}%";
 
-        // FATE-START NPC: some fates (defend/escort) must be started by talking to an NPC (the
-        // orange "!"). Handle the dialogue + Yes/No before anything else.
-        if (TryStartFateViaNpc(fate)) return;
+        // FATE-START NPC: ONLY defend/escort fates begin by talking to an NPC (orange "!"). For
+        // COLLECT fates the "!" NPC is the TURN-IN npc (handled inside HandleCollectFate), so we
+        // must NOT treat it as a start NPC or we loop re-opening the Item Request window.
+        if (type is FateType.Defend or FateType.Escort)
+        {
+            if (TryStartFateViaNpc(fate)) return;
+        }
 
         // Keep ourselves inside the fate ring if we've drifted out. Don't do this when the combat
         // backend (BMR AI) is driving movement, and never re-mount for these short hops.
@@ -677,24 +683,131 @@ public sealed unsafe class FarmingController
     private bool BmrMovementActive() => IPCManager.BmrHandlesMovement(C);
 
     // ---------------------------------------------------------------- collect fates
-    private void HandleCollectFate(IFate fate)
+    private unsafe void HandleCollectFate(IFate fate)
     {
-        // Collect fates: we don't need to "complete" them, just hit the turn-in threshold.
-        // Strategy: pick up items / kill mobs (handled by combat backend + looting), then turn in.
-        // We estimate needed turn-ins by turning in an initial batch and using the progress delta.
+        // Collect fates: grab the labeled ground items (EventObj carrying the FateId), turn them in
+        // to the "!" NPC, and learn how many we still need from the fate progress delta. We DON'T
+        // need to "complete" the fate — just reach 100% progress (or run dry), then leave.
         var collectItemId = FateSelector.GetCollectItemId(fate);
+        var have = collectItemId != 0 ? InventoryUtil.GetItemCount(collectItemId) : 0;
 
-        // For now, keep the player engaged (grab items, fight if aggroed) via the combat backend,
-        // and periodically attempt a turn-in when we have items. The precise turn-in addon flow is
-        // flagged for in-game tuning.
-        StatusText = $"Collect fate: {fate.Name} {fate.Progress}% (item {collectItemId})";
+        // --- 1) If the Item Request (turn-in) window is open, drive the hand-in. ---
+        if (ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>(
+                "Request", out var req) && req != null && req->IsVisible)
+        {
+            HandleRequestWindow((nint)req, fate, collectItemId);
+            return;
+        }
 
-        if (BmrMovementActive())
-            return; // BMR will move us around; manual item pickup is a tuning follow-up
+        // --- 2) Decide whether to turn in now. ---
+        // Turn in once we have a batch (initial sample = CollectInitialTurnIn) OR once we hold the
+        // estimated remaining amount. Until we've learned the per-item value, use the initial batch.
+        var batch = _collectEstimatedNeeded > 0
+            ? Math.Min(have, _collectEstimatedNeeded - _collectTurnedIn)
+            : C.CollectInitialTurnIn;
 
-        // Fallback movement: orbit the fate center.
-        if (!ECommons.GenericHelpers.IsOccupied())
-            Navigator.MoveTo(C, fate.Position, Math.Max(2f, fate.Radius * 0.5f));
+        var fateProgress = fate.Progress;
+        var done = fateProgress >= 100;
+        if (done)
+        {
+            // Threshold hit — leave for the next fate (collect fates don't need completing).
+            OnFateFinished();
+            return;
+        }
+
+        if (collectItemId != 0 && have > 0 && have >= Math.Min(batch, C.CollectInitialTurnIn))
+        {
+            // Walk to the turn-in NPC and interact to open the Request window.
+            var npc = FateTargeting.GetCollectTurnInNpc(_targetFateId);
+            if (npc != null)
+            {
+                var me2 = Player.Object;
+                if (me2 != null && Vector3.Distance(me2.Position, npc.Position) > 4f)
+                {
+                    if (!ECommons.GenericHelpers.IsOccupied())
+                        Navigator.MoveTo(C, npc.Position, 3f, allowMount: false);
+                    StatusText = $"Collect: turning in (to {npc.Name})";
+                    return;
+                }
+                Navigator.Stop();
+                if (Player.IsAnimationLocked || !Player.Interactable) return;
+                if (Svc.Targets.Target?.GameObjectId != npc.GameObjectId)
+                    Svc.Targets.Target = npc;
+                if (EzThrottler.Throttle("AF_CollectInteract", 1500))
+                {
+                    _collectProgressBeforeTurnIn = fateProgress; // sample to learn per-item value
+                    FFXIVClientStructs.FFXIV.Client.Game.Control.TargetSystem.Instance()
+                        ->InteractWithObject(((FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)npc.Address), false);
+                }
+                return;
+            }
+        }
+
+        // --- 3) Otherwise gather: go pick up the nearest ground collectable. ---
+        var item = FateTargeting.GetNearestCollectable(_targetFateId);
+        if (item != null)
+        {
+            var me = Player.Object;
+            if (me != null && Vector3.Distance(me.Position, item.Position) > 3f)
+            {
+                if (!ECommons.GenericHelpers.IsOccupied())
+                    Navigator.MoveTo(C, item.Position, 2f, allowMount: false);
+                StatusText = $"Collect: grabbing {item.Name} (have {have})";
+                return;
+            }
+            Navigator.Stop();
+            if (Player.IsAnimationLocked || !Player.Interactable) return;
+            if (Svc.Targets.Target?.GameObjectId != item.GameObjectId)
+                Svc.Targets.Target = item;
+            if (EzThrottler.Throttle("AF_CollectPickup", 1200))
+                FFXIVClientStructs.FFXIV.Client.Game.Control.TargetSystem.Instance()
+                    ->InteractWithObject(((FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)item.Address), false);
+            return;
+        }
+
+        // No ground items right now: kill mobs only if they aggro (handled by ClearingAggro guard),
+        // else hold near center and wait for collectables to respawn.
+        StatusText = $"Collect fate: {fate.Name} {fateProgress}% (have {have}, item {collectItemId})";
+        if (!BmrMovementActive() && !ECommons.GenericHelpers.IsOccupied())
+            Navigator.MoveTo(C, fate.Position, Math.Max(2f, fate.Radius * 0.5f), allowMount: false);
+    }
+
+    /// <summary>
+    /// Drive the Item Request (collect turn-in) window: fill the slot with the collect item and
+    /// click Hand Over. Per the user's flow: right-click the request slot, select the item to fill,
+    /// then Hand Over. We use ECommons' Request master for Hand Over + AgentInventoryContext to fill.
+    /// Also learns how much fate-progress each turn-in grants to estimate the remaining count.
+    /// </summary>
+    private unsafe void HandleRequestWindow(nint reqAddon, IFate fate, uint collectItemId)
+    {
+        var rq = new ECommons.UIHelpers.AddonMasterImplementations.AddonMaster.Request(reqAddon);
+
+        // If hand-over is enabled, the slot is filled -> click it.
+        if (rq.IsHandOverEnabled)
+        {
+            if (EzThrottler.Throttle("AF_HandOver", 800))
+            {
+                rq.HandOver();
+                // Learn per-item progress from the delta after the hand-in lands (next ticks).
+                _collectTurnedIn += Math.Max(1, C.CollectInitialTurnIn);
+            }
+            return;
+        }
+
+        // Slot not filled yet: place the collect item into the request slot. The user's flow is:
+        // right-click the item in the inventory -> it fills the open Request slot. We open the
+        // item's context menu against the Request addon, which fills the slot.
+        if (collectItemId != 0 && EzThrottler.Throttle("AF_FillRequest", 800))
+        {
+            var addonId = GetAddonId("Request");
+            InventoryUtil.OpenItemContextMenu(collectItemId, addonId);
+        }
+    }
+
+    private static unsafe uint GetAddonId(string name)
+    {
+        return ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>(name, out var a) && a != null
+            ? (uint)a->Id : 0u;
     }
 
     // ---------------------------------------------------------------- escort fates
