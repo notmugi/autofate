@@ -33,6 +33,11 @@ public sealed unsafe class FarmingController
     private int _zoneRotationIndex;
     private readonly Dictionary<uint, int> _zoneFatesDone = new();
 
+    // After a gemstone shopping session, remember the gem count so we don't immediately re-enter
+    // the shop (continuous-buy entries always "want more"). We only shop again once we've farmed
+    // more gems than we had when the last session ended.
+    private int _gemCountAfterLastShop = -1;
+
     // Zone dwell: when we last saw an active FATE in the current zone. We stay and wait for FATEs
     // to respawn rather than zone-hopping the instant a zone is empty.
     private long _lastFateSeenMs;
@@ -1048,8 +1053,10 @@ public sealed unsafe class FarmingController
             return true;
         }
 
-        // Gemstone shopping.
-        if (GemstoneShopper.ShouldShop(C))
+        // Gemstone shopping. Don't re-enter right after a session unless we've farmed more gems
+        // (prevents the open->close->reinteract loop caused by continuous-buy always "wanting more").
+        if (GemstoneShopper.ShouldShop(C)
+            && (_gemCountAfterLastShop < 0 || Features.InventoryUtil.GetGemstoneCount() > _gemCountAfterLastShop))
         {
             State = FarmState.GemstoneShopping;
             return true;
@@ -1115,7 +1122,13 @@ public sealed unsafe class FarmingController
                 if (EzThrottler.Throttle("AF_CloseShop", 300))
                 {
                     if (GemstoneShopper.CloseShop())
+                    {
+                        // Latch the current gem count so we don't immediately re-enter the shop
+                        // (continuous-buy entries always report "want more"). We'll only shop again
+                        // after farming raises our gem count above this.
+                        _gemCountAfterLastShop = Features.InventoryUtil.GetGemstoneCount();
                         State = FarmState.SelectingZone;
+                    }
                 }
             }
             return;
