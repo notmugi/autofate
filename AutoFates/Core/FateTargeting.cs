@@ -349,6 +349,26 @@ public static unsafe class FateTargeting
         return best;
     }
 
+    /// <summary>
+    /// Force-open combat on the given target by firing the basic "Attack" action (Action #7). None
+    /// of the rotation backends reliably OPEN combat on their own (RSR/BMR only act once in combat;
+    /// Wrath needs a working lease), so we kick it off ourselves. This starts auto-attack, which
+    /// puts us in combat and lets every backend take over. No-ops if already attacking this target.
+    /// </summary>
+    public static void StartAutoAttack(IBattleNpc target)
+    {
+        if (target == null || target.IsDead || target.CurrentHp == 0) return;
+        var am = FFXIVClientStructs.FFXIV.Client.Game.ActionManager.Instance();
+        if (am == null) return;
+        // Action 7 = "Attack" (toggles auto-attack on the current target).
+        if (!ECommons.Throttlers.EzThrottler.Throttle("AF_AutoAttack", 500)) return;
+        try
+        {
+            am->UseAction(FFXIVClientStructs.FFXIV.Client.Game.ActionType.Action, 7, target.GameObjectId);
+        }
+        catch (System.Exception e) { Svc.Log.Verbose($"[Combat] StartAutoAttack failed: {e.Message}"); }
+    }
+
     /// <summary>Ensure we're targeting the nearest enemy attacking us. Returns it, or null if none.</summary>
     public static IBattleNpc? EnsureAttackerTarget()
     {
@@ -379,6 +399,25 @@ public static unsafe class FateTargeting
                     Svc.Targets.Target = threat;
                 return threat;
             }
+        }
+
+        // PRIORITY: if anything is actually attacking us (or our chocobo), deal with the nearest
+        // attacker first — standing still pointing at a distant mob while others beat on us is the
+        // bug we're fixing. Only switch if our current target ISN'T already one of the attackers.
+        var attackers = GetEnemiesAttackingMe();
+        if (attackers.Count > 0)
+        {
+            var curId = (Svc.Targets.Target as IBattleNpc)?.GameObjectId ?? 0;
+            var alreadyOnAttacker = attackers.Exists(a => a.GameObjectId == curId);
+            if (!alreadyOnAttacker)
+            {
+                // Prefer an attacker that belongs to this fate; otherwise the nearest attacker.
+                var fa = attackers.Find(a => IsFateEnemy(a, fateId)) ?? attackers[0];
+                Svc.Targets.Target = fa;
+                return fa;
+            }
+            // Current target is already an attacker — keep it (don't yank mid-cast).
+            return Svc.Targets.Target as IBattleNpc;
         }
 
         // Keep the current target if it's still a valid fate enemy.

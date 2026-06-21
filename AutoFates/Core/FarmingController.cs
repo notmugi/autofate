@@ -755,91 +755,90 @@ public sealed unsafe class FarmingController
         if (target != null && EzThrottler.Throttle("AF_TargetLog", 3000))
             Svc.Log.Debug($"[Combat] Targeting fate mob '{target.Name}' ({FateTargeting.CountFateEnemies(_targetFateId)} fate mobs nearby).");
 
+        // WHEN BMR OWNS MOVEMENT: let BMR do everything — it paths to the target AND dodges AOEs.
+        // We only pick the target (for mass-pull, the nearest un-aggroed mob to widen the pull) and
+        // otherwise stay completely out of movement. We must NOT forbid BMR movement or issue vnav
+        // here, or BMR can't dodge (that was the "not dodging AOEs at all" regression). Make sure
+        // movement is handed back in case a previous non-BMR path left it forbidden.
+        if (BmrMovementActive())
+        {
+            IPCManager.SetBmrMovement(true); // ensure BMR can move/dodge (no-op if already allowed)
+
+            if (target == null) return; // BMR will reposition; nothing to target yet
+
+            // Mass-pull: prefer targeting an un-aggroed mob in range so the rotation pulls more.
+            if (C.MassPull)
+            {
+                var aggroed = FateTargeting.CountAggroedFateEnemies(_targetFateId, C.MassPullRange + 5f);
+                if (aggroed < C.MassPullMaxPile)
+                {
+                    var pull = FateTargeting.GetNearestUnaggroedFateEnemy(_targetFateId, C.MassPullRange);
+                    if (pull != null && Player.Object is not { IsCasting: true })
+                    {
+                        Svc.Targets.Target = pull;
+                        return;
+                    }
+                }
+            }
+            // Otherwise keep the chosen fate target; BMR handles the rest.
+            if (Svc.Targets.Target is not IBattleNpc cur || !FateTargeting.IsFateEnemy(cur, _targetFateId))
+                Svc.Targets.Target = target;
+            // Force-open combat ourselves so we don't stand idle waiting to be hit.
+            FateTargeting.StartAutoAttack(Svc.Targets.Target as IBattleNpc ?? target);
+            return;
+        }
+
         if (target == null)
         {
-            // No fate mobs nearby. Move toward the fate center to find action. Do this even under
-            // BMR (taking movement over) — BMR won't wander to find un-aggroed mobs on its own.
+            // No fate mobs nearby. Move toward the fate center to find action.
             if (!ECommons.GenericHelpers.IsOccupied()
                 && Vector3.Distance(me.Position, fate.Position) > fate.Radius * 0.4f)
             {
-                if (BmrMovementActive() && IPCManager.BmrInstalled)
-                    IPCManager.SetBmrMovement(false);
                 Navigator.MoveTo(C, fate.Position, Math.Max(2f, fate.Radius * 0.4f), allowMount: false);
             }
             return;
         }
 
-        // MASS PULL (AutoDuty KillInRange model): grab the aggro of every fate enemy in range (up to
-        // a cap), then stop and let the rotation/AI AOE the pile down. We measure the pile by how
-        // many fate enemies are actually AGGROED onto us (in combat, targeting us/our chocobo) —
-        // proximity alone isn't a pull. While under the cap and there's an un-aggroed enemy in
-        // range, we path to it to body-pull it. Once capped (or nothing left un-aggroed in range),
-        // we hold position and fight.
-        //
-        // Unlike normal in-fate movement, the pull DOES path even when BMR owns movement — exactly
-        // like AutoDuty, which force-stops vnav once engaged but still drives toward un-aggroed
-        // mobs. We briefly take movement from BMR for the pull, then hand it back when the pile is
-        // full so BMR can resume AOE dodging.
+        // --- Below here BMR does NOT own movement (we returned above if it did). We drive movement
+        // ourselves via vnav. ---
+
+        // MASS PULL (AutoDuty KillInRange model): while under the pile cap and there's an un-aggroed
+        // fate enemy within range, walk to it to body-pull it; once capped (or nothing left nearby),
+        // fall through to the standard engage-walk.
         if (C.MassPull && !ECommons.GenericHelpers.IsOccupied())
         {
-            var maxPile = C.MassPullMaxPile;        // never try to hold more than this many at once
-            var pullRange = C.MassPullRange;        // only pull enemies within this radius of us
-            var pileRange = C.MassPullRange + 5f;   // count aggroed mobs slightly beyond pull radius
-
-            var aggroed = FateTargeting.CountAggroedFateEnemies(_targetFateId, pileRange);
-            if (aggroed < maxPile)
+            var aggroed = FateTargeting.CountAggroedFateEnemies(_targetFateId, C.MassPullRange + 5f);
+            if (aggroed < C.MassPullMaxPile)
             {
-                var pull = FateTargeting.GetNearestUnaggroedFateEnemy(_targetFateId, pullRange);
+                var pull = FateTargeting.GetNearestUnaggroedFateEnemy(_targetFateId, C.MassPullRange);
                 if (pull != null)
                 {
-                    // Target the un-aggroed mob so the rotation lands a pull (ranged shot / approach),
-                    // but don't yank the target mid-cast (that cancels the cast).
-                    var meCasting = Player.Object is { IsCasting: true };
-                    if (!meCasting)
+                    if (Player.Object is not { IsCasting: true })
                         Svc.Targets.Target = pull;
-
-                    // Path to it to body-pull. If BMR owns movement, take it over for the pull so
-                    // we actually walk to the mob (BMR won't chase un-aggroed adds on its own).
-                    if (BmrMovementActive() && IPCManager.BmrInstalled)
-                        IPCManager.SetBmrMovement(false);
-
                     if (Vector3.Distance(me.Position, pull.Position) > 1.5f)
                         Navigator.MoveTo(C, pull.Position, 1.2f, allowMount: false);
                     else
                         Navigator.Stop();
                     return;
                 }
-                // Nothing un-aggroed within pull radius. DON'T stop here — fall through to the normal
-                // engage-walk below so we still navigate to the nearest fate enemy even if it's
-                // beyond the pull radius (mass pull only ADDS nearby-grabbing; it must never prevent
-                // reaching the actual target). Hand movement back to BMR first.
+                // Nothing un-aggroed within pull radius -> fall through to engage the actual target
+                // (which may be beyond pull range). Mass pull only ADDS nearby-grabbing.
             }
-            // Either the pile is full, or there's nothing left to pull nearby. Hand movement back to
-            // BMR (undo any pull takeover) and fall through to standard engage.
-            if (BmrMovementActive() && IPCManager.BmrInstalled)
-                IPCManager.SetBmrMovement(true);
         }
 
-        // Walk into melee/casting range of the target so the rotation backend can attack. We ALWAYS
-        // navigate to an out-of-range target ourselves — even under BMR — because BMR's AI won't
-        // chase a fate enemy that isn't aggroed onto us yet (that was the "doesn't navigate to mobs"
-        // regression). Like the mass-pull, we take movement from BMR while closing the gap, then
-        // hand it back once we're in range so BMR can resume AOE dodging.
+        // Walk into melee/casting range of the target so the rotation backend (Wrath/RSR) can attack.
         var dist = Vector3.Distance(me.Position, target.Position);
         var engageRange = Math.Max(2.5f, target.HitboxRadius + 2.5f);
         if (dist > engageRange && !ECommons.GenericHelpers.IsOccupied())
         {
-            // Out of range -> close the distance. Take movement from BMR if it owns it.
-            if (BmrMovementActive() && IPCManager.BmrInstalled)
-                IPCManager.SetBmrMovement(false);
             Navigator.MoveTo(C, target.Position, engageRange, allowMount: false);
         }
         else
         {
-            // In range -> stop pathing and hand movement back to BMR for AOE dodging.
             Navigator.Stop();
-            if (BmrMovementActive() && IPCManager.BmrInstalled)
-                IPCManager.SetBmrMovement(true);
+            // In range: force-open combat ourselves (auto-attack) so the backend engages even if it
+            // would otherwise wait to be hit / has no working lease.
+            FateTargeting.StartAutoAttack(target);
         }
     }
 
@@ -1147,7 +1146,11 @@ public sealed unsafe class FarmingController
             _startedFateId = 0;
             _collectTurnedIn = 0;
             _collectEstimatedNeeded = 0;
-            State = FarmState.InFate;
+            // Route through TravelingToFate (NOT straight to InFate) so we walk to the fate CENTER —
+            // same dropoff as normal farming. GetCurrentFate triggers at the ring EDGE, and InFate
+            // only re-centers when outside the ring, so jumping straight to InFate left us stranded
+            // at the edge. TravelingToFate drives to arrivalRange (4y) of center.
+            State = FarmState.TravelingToFate;
             StatusText = $"Follow: entering fate {fate.Name}";
             return;
         }

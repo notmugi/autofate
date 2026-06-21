@@ -125,7 +125,9 @@ public static class IPCManager
         {
             BossModIPC.ClearActivePreset();
             BossModIPC.AiEnable(false);
+            BossModIPC.ResetAiEnableCache();      // reset cache so next run re-issues "/bmrai on"
             BossModIPC.AiForbidMovement(false);   // undo mass-pull movement takeover
+            _lastBmrForbidMovement = null;        // reset cache so next run re-issues correctly
             BossModIPC.AiForbidActions(false);
             BossModIPC.AiFollowTarget(false);
             BossModIPC.AiFollowCombat(false);
@@ -148,9 +150,18 @@ public static class IPCManager
     /// (used during mass-pull so we can chase un-aggroed adds BMR won't pursue); allowing hands it
     /// back so BMR resumes AOE dodging.
     /// </summary>
+    // Tracks the last forbid-movement state we sent to BMR so we only re-issue the chat command
+    // when it actually changes (callers hammer SetBmrMovement every tick, and each call echoed a
+    // "/bmrai forbidmovement on/off" line to chat -> spam). null = unknown/never set.
+    private static bool? _lastBmrForbidMovement;
+
     public static void SetBmrMovement(bool allow)
     {
-        if (BossModIPC.IsInstalled) BossModIPC.AiForbidMovement(!allow);
+        if (!BossModIPC.IsInstalled) return;
+        var forbid = !allow;
+        if (_lastBmrForbidMovement == forbid) return; // no change -> don't re-issue / spam chat
+        _lastBmrForbidMovement = forbid;
+        BossModIPC.AiForbidMovement(forbid);
     }
 
     /// <summary>

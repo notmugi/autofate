@@ -65,8 +65,19 @@ public static class BossModIPC
     }
 
     // ----------------------------------------------------- AI (movement / dodge)
-    // BMR AI is controlled with the /bmrai chat command.
-    public static void AiEnable(bool enable) => Chat.ExecuteCommand($"/bmrai {(enable ? "on" : "off")}");
+    // BMR AI is controlled with the /bmrai chat command. Cache the last state so we only send the
+    // command when it actually changes — StartCombat is called every tick, and firing "/bmrai on"
+    // every frame spammed chat. null = unknown/never set.
+    private static bool? _lastAiEnabled;
+    public static void AiEnable(bool enable)
+    {
+        if (_lastAiEnabled == enable) return;
+        _lastAiEnabled = enable;
+        Chat.ExecuteCommand($"/bmrai {(enable ? "on" : "off")}");
+    }
+
+    /// <summary>Reset the cached AI-enable state (call on Stop so the next run re-issues).</summary>
+    public static void ResetAiEnableCache() => _lastAiEnabled = null;
 
     // ----------------------------------------------------- danger detection (Hints)
     /// <summary>Number of active forbidden zones (incoming AOEs we should be out of).</summary>
