@@ -63,6 +63,21 @@ public sealed partial class MainWindow
 
         var massPull = C.MassPull;
         if (ImGui.Checkbox("Mass-pull enemies in the area", ref massPull)) { C.MassPull = massPull; Save(); }
+        if (C.MassPull)
+        {
+            ImGui.Indent();
+            var maxPile = C.MassPullMaxPile;
+            if (ImGui.SliderInt("Max enemies to hold at once", ref maxPile, 1, 20))
+            {
+                C.MassPullMaxPile = maxPile; Save();
+            }
+            var pullRange = C.MassPullRange;
+            if (ImGui.SliderFloat("Pull radius (yalms)", ref pullRange, 5f, 40f))
+            {
+                C.MassPullRange = pullRange; Save();
+            }
+            ImGui.Unindent();
+        }
 
         var dodge = C.AutoDodgeAoe;
         if (ImGui.Checkbox("Auto-dodge AOEs (when not using BMR for movement)", ref dodge)) { C.AutoDodgeAoe = dodge; Save(); }
@@ -71,6 +86,25 @@ public sealed partial class MainWindow
         if (ImGui.SliderFloat("Safe distance from non-fate enemies (yalms)", ref safe, 0, 30))
         {
             C.SafeDistance = safe; Save();
+        }
+
+        ImGui.Separator();
+        ImGui.TextUnformatted("Party:");
+        var followLeader = C.FollowPartyLeader;
+        if (ImGui.Checkbox("Follow party leader (don't navigate to fates)", ref followLeader))
+        {
+            C.FollowPartyLeader = followLeader; Save();
+        }
+        ImGui.SameLine(); Help("Instead of picking and pathing to our own FATEs, just follow the party leader and run whatever FATE they drop us in. Good for multiboxing or farming with friends. Uses BMR's native follow when BMR handles movement, otherwise vnavmesh.");
+        if (C.FollowPartyLeader)
+        {
+            ImGui.Indent();
+            var followDist = C.FollowDistance;
+            if (ImGui.SliderFloat("Follow distance (yalms)", ref followDist, 1f, 15f))
+            {
+                C.FollowDistance = followDist; Save();
+            }
+            ImGui.Unindent();
         }
 
         ImGui.Separator();

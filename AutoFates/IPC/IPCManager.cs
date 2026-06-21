@@ -109,9 +109,49 @@ public static class IPCManager
             BossModIPC.AiEnable(false);
     }
 
+    /// <summary>
+    /// Hard shutdown of EVERY combat/movement IPC we ever touch, regardless of the configured
+    /// backend. Called on Stop so nothing is left running if the user changed backends or we left
+    /// a BMR follow/forbid flag set. Each call is independently guarded (no-ops if not installed).
+    /// </summary>
+    public static void ShutdownAll()
+    {
+        // Rotation backends.
+        if (WrathComboIPC.IsInstalled) WrathComboIPC.Disable();
+        if (RotationSolverIPC.IsInstalled) RotationSolverIPC.SetOff();
+
+        // BossMod Reborn: clear preset, disable AI, and clear any follow/forbid flags we set.
+        if (BossModIPC.IsInstalled)
+        {
+            BossModIPC.ClearActivePreset();
+            BossModIPC.AiEnable(false);
+            BossModIPC.AiForbidMovement(false);   // undo mass-pull movement takeover
+            BossModIPC.AiForbidActions(false);
+            BossModIPC.AiFollowTarget(false);
+            BossModIPC.AiFollowCombat(false);
+            BossModIPC.AiFollowOutOfCombat(false);
+        }
+
+        // Navigation.
+        NavmeshIPC.Stop();
+    }
+
     /// <summary>Whether BMR is handling movement/AOE dodging right now.</summary>
     public static bool BmrHandlesMovement(Configuration c)
         => c.MovementBackend == CombatBackend.BossModReborn && BossModIPC.IsInstalled;
+
+    /// <summary>Is BMR installed?</summary>
+    public static bool BmrInstalled => BossModIPC.IsInstalled;
+
+    /// <summary>
+    /// Allow (true) or forbid (false) BMR's AI from moving us. Forbidding hands movement to vnav
+    /// (used during mass-pull so we can chase un-aggroed adds BMR won't pursue); allowing hands it
+    /// back so BMR resumes AOE dodging.
+    /// </summary>
+    public static void SetBmrMovement(bool allow)
+    {
+        if (BossModIPC.IsInstalled) BossModIPC.AiForbidMovement(!allow);
+    }
 
     /// <summary>
     /// In the smart-mix (BMR movement) setup: true when we should stop our own pathing and let

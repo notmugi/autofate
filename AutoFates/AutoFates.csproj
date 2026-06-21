@@ -9,7 +9,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>AutoFates</AssemblyName>
     <RootNamespace>AutoFates</RootNamespace>
-    <Version>1.0.0.3</Version>
+    <Version>2.0.0.0</Version>
     <Deterministic>true</Deterministic>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
@@ -74,5 +74,19 @@
   <ItemGroup>
     <PackageReference Include="DalamudPackager" Version="11.0.0" />
   </ItemGroup>
+
+  <!--
+    DalamudPackager packs the built DLL into latest.zip (and a subfolder) but does NOT guarantee
+    AutoFates.dll stays in the output root. Our dev-load path points at $(OutputPath)AutoFates.dll,
+    so copy the freshly compiled assembly from the intermediate (obj) dir back into the output root
+    AFTER packaging. Runs last so it isn't clobbered.
+  -->
+  <Target Name="EnsureDevDll" AfterTargets="Build;PackagePlugin">
+    <Copy SourceFiles="$(IntermediateOutputPath)$(AssemblyName).dll"
+          DestinationFiles="$(OutputPath)$(AssemblyName).dll"
+          SkipUnchangedFiles="false"
+          OverwriteReadOnlyFiles="true" />
+    <Message Importance="high" Text="[AutoFates] Copied $(AssemblyName).dll to $(OutputPath) for dev loading." />
+  </Target>
 
 </Project>

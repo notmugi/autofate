@@ -64,6 +64,10 @@ public sealed class Configuration
     public bool AutoLevelSync = true;
     /// <summary>Pull every enemy in the fate area.</summary>
     public bool MassPull = false;
+    /// <summary>Max number of enemies to hold aggro on at once during mass pull.</summary>
+    public int MassPullMaxPile = 5;
+    /// <summary>Only pull enemies within this radius (yalms) of the player during mass pull.</summary>
+    public float MassPullRange = 20f;
     /// <summary>Keep this distance (yalms) from non-fate enemies to avoid aggro.</summary>
     public float SafeDistance = 8f;
     /// <summary>Self AOE dodging when not using BMR for movement.</summary>

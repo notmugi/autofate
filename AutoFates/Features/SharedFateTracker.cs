@@ -2,6 +2,7 @@ using ECommons.DalamudServices;
 using ECommons.Throttlers;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
+using FFXIVClientStructs.FFXIV.Component.GUI;
 
 namespace AutoFates.Features;
 
@@ -25,57 +26,130 @@ public static unsafe class SharedFateTracker
     }
 
     private static AgentFateProgress* Agent => AgentFateProgress.Instance();
+    private const string AddonName = "FateProgress";
 
-    /// <summary>True once the agent has zone data we can read.</summary>
-    public static bool HasData()
-    {
-        var a = Agent;
-        if (a == null) return false;
-        try
-        {
-            var tabs = a->Tabs;
-            return tabs.Length > 0;
-        }
-        catch { return false; }
-    }
+    // Internally cached zone data. We open the Shared FATE window ONCE, read everything into this
+    // cache, then close the window. All reads go through the cache so we never re-open the window.
+    private static readonly List<ZoneProgress> _cache = new();
+    private static bool _captured;
+
+    /// <summary>True once we've captured (cached) zone data this session.</summary>
+    public static bool HasData() => _captured && _cache.Count > 0;
 
     /// <summary>
-    /// Make sure the Shared FATE agent has data. If it doesn't, briefly open it to populate the
-    /// cache. Returns true once data is available. Throttled so we don't spam the addon.
+    /// One-shot data load + window close, driven each tick by the controller. Flow:
+    ///   1. If we've already captured data, do nothing (return true).
+    ///   2. Open the Shared FATE window (MainCommand 84).
+    ///   3. Once the agent has populated, read all zones into the cache.
+    ///   4. Spam-close the window until it's confirmed gone.
+    /// Returns true once data is cached AND the window is closed.
     /// </summary>
+    private static long _windowOpenedAtMs;
+    private const long HoldOpenMs = 2000; // keep the window open this long before capturing+closing
+
     public static bool EnsureData()
     {
-        if (HasData()) return true;
-        if (ECommons.GenericHelpers.IsOccupied()) return false;
-        FireOpenCommand();
-        return HasData();
+        if (_captured && _cache.Count > 0 && !AddonVisible()) return true;
+        if (ECommons.GenericHelpers.IsOccupied() && !AddonVisible()) return false;
+
+        // Step 1: make sure the window is open. Record when it first became visible so we can hold
+        // it open for HoldOpenMs (the agent's per-zone data takes a moment to fully populate).
+        if (!AddonVisible())
+        {
+            _windowOpenedAtMs = 0;
+            FireOpenCommand();
+            return false; // wait for it to open
+        }
+        if (_windowOpenedAtMs == 0)
+            _windowOpenedAtMs = Environment.TickCount64;
+
+        // Step 2: hold the window open for at least HoldOpenMs so the data is fully loaded, while
+        // continuously trying to capture into the cache.
+        if (AgentHasData())
+            CaptureFromAgent();
+
+        if (Environment.TickCount64 - _windowOpenedAtMs < HoldOpenMs)
+            return false; // keep it open a bit longer so the user (and the agent) can settle
+
+        // Step 3: held long enough — capture one final time, then spam-close until gone.
+        if (AgentHasData())
+            CaptureFromAgent();
+        if (EzThrottler.Throttle("AF_SharedFateClose", 200))
+            CloseWindow();
+        if (AddonVisible())
+            return false; // not done until closed
+        _windowOpenedAtMs = 0;
+        return _captured && _cache.Count > 0;
     }
 
     /// <summary>
-    /// Periodically re-open the Shared FATE window to repopulate fresh per-zone data. The agent's
-    /// cache goes stale after we complete fates, so we re-fire MainCommand 84 on an interval (and
-    /// immediately close the window again so it doesn't sit on screen). Call this each tick; it's
-    /// throttled internally to <paramref name="intervalMs"/>.
+    /// Force a fresh capture: re-open the window, re-read the cache, close again. Used after
+    /// completing a fate so per-zone progress reflects the change.
     /// </summary>
     public static void RefreshData(int intervalMs = 60000, bool force = false)
     {
-        if (ECommons.GenericHelpers.IsOccupied()) return;
         if (!force && !EzThrottler.Throttle("AF_RefreshFateProgress", intervalMs)) return;
-        FireOpenCommand(force);
-        // Close it right back so it doesn't linger on screen; the agent keeps the refreshed data.
-        try { ECommons.Automation.WindowsKeypress.SendKeypress(ECommons.Interop.LimitedKeys.Escape); }
-        catch { /* ignore */ }
+        _captured = false; // invalidate so EnsureData re-captures + re-closes
+    }
+
+    private static bool AddonVisible()
+        => ECommons.GenericHelpers.TryGetAddonByName<AtkUnitBase>(AddonName, out var a) && a != null && a->IsVisible;
+
+    /// <summary>Does the live agent currently expose readable tab/zone data?</summary>
+    private static bool AgentHasData()
+    {
+        var a = Agent;
+        if (a == null) return false;
+        try { return a->Tabs.Length > 0; }
+        catch { return false; }
+    }
+
+    /// <summary>Read all zones from the live agent into the internal cache.</summary>
+    private static void CaptureFromAgent()
+    {
+        var a = Agent;
+        if (a == null) return;
+        try
+        {
+            _cache.Clear();
+            foreach (ref var tab in a->Tabs)
+            {
+                foreach (ref var z in tab.Zones)
+                {
+                    if (z.TerritoryTypeId == 0) continue;
+                    _cache.Add(new ZoneProgress(
+                        z.TerritoryTypeId, z.ZoneName.ToString(),
+                        z.CurrentRank, z.MaxRank, z.FateProgress, z.NeededFates));
+                }
+            }
+            if (_cache.Count > 0)
+            {
+                _captured = true;
+                Svc.Log.Debug($"[SharedFate] Cached {_cache.Count} zones.");
+            }
+        }
+        catch (Exception e) { Svc.Log.Verbose($"[SharedFate] CaptureFromAgent failed: {e.Message}"); }
     }
 
     /// <summary>
-    /// Open the Shared FATE window exactly like the in-game Travel menu / keybind does: fire
-    /// MainCommand 84 ("Shared FATE") via the UIModule. This populates the agent's per-zone data
-    /// (a->Show() alone doesn't reliably load it).
+    /// Close the Shared FATE window. EXACTLY like the working repair/vendor close: fire ONLY the
+    /// cancel callback and let the caller retry until AddonVisible() is false. Do NOT also call
+    /// Close(true)/Escape in the same pass — Close(true) tears down the addon's callback state so
+    /// the Fire lands on a half-dead addon and nothing happens (that's why it stayed open).
     /// </summary>
+    private static void CloseWindow()
+    {
+        if (ECommons.GenericHelpers.TryGetAddonByName<AtkUnitBase>(AddonName, out var a) && a != null && a->IsVisible)
+        {
+            try { ECommons.Automation.Callback.Fire(a, true, -1); }
+            catch (Exception e) { Svc.Log.Verbose($"[SharedFate] Callback.Fire close failed: {e.Message}"); }
+        }
+    }
+
     private static void FireOpenCommand(bool force = false)
     {
         if (Agent == null) return;
-        if (!force && !EzThrottler.Throttle("AF_OpenFateProgress", 3000)) return;
+        if (!force && !EzThrottler.Throttle("AF_OpenFateProgress", 1000)) return;
         try
         {
             FFXIVClientStructs.FFXIV.Client.System.Framework.Framework.Instance()
@@ -84,32 +158,8 @@ public static unsafe class SharedFateTracker
         catch (Exception e) { Svc.Log.Verbose($"[SharedFate] ExecuteMainCommand(84) failed: {e.Message}"); }
     }
 
-    /// <summary>Read all zones across all expansion tabs.</summary>
-    public static List<ZoneProgress> GetAllZones()
-    {
-        var result = new List<ZoneProgress>();
-        var a = Agent;
-        if (a == null) return result;
-        try
-        {
-            foreach (ref var tab in a->Tabs)
-            {
-                foreach (ref var z in tab.Zones)
-                {
-                    if (z.TerritoryTypeId == 0) continue;
-                    result.Add(new ZoneProgress(
-                        z.TerritoryTypeId,
-                        z.ZoneName.ToString(),
-                        z.CurrentRank,
-                        z.MaxRank,
-                        z.FateProgress,
-                        z.NeededFates));
-                }
-            }
-        }
-        catch (Exception e) { Svc.Log.Verbose($"[SharedFate] GetAllZones failed: {e.Message}"); }
-        return result;
-    }
+    /// <summary>Read all cached zones across all expansion tabs.</summary>
+    public static List<ZoneProgress> GetAllZones() => new(_cache);
 
     /// <summary>Get the shared-fate progress for one territory, if present.</summary>
     public static ZoneProgress? GetZone(uint territoryId)

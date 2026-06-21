@@ -85,16 +85,19 @@ public static unsafe class RepairManager
         }
 
         _repairCloseAttempts++;
+        // EXACTLY like GatherBuddy Reborn's TaskCloseRepairWindow: fire ONLY the cancel callback and
+        // retry. Do NOT also call Close(true)/Escape in the same pass — Close(true) tears down the
+        // addon's callback state so the Fire lands on a half-dead addon and nothing happens (that's
+        // why the window stayed open). After ~10 attempts, force-hide the agent as the fallback.
         if (_repairCloseAttempts > 20)
         {
-            // Fallback: hide the Repair agent directly (GBR does this on timeout).
+            Svc.Log.Warning("[Repair] Timed out closing repair window; forcing close via agent Hide.");
             try { AgentModule.Instance()->GetAgentByInternalId(AgentId.Repair)->Hide(); }
             catch (Exception e) { Svc.Log.Verbose($"[Repair] Agent Hide fallback failed: {e.Message}"); }
             return false;
         }
-
         try { Callback.Fire(addon, true, -1); }
-        catch (Exception e) { Svc.Log.Verbose($"[Repair] CloseRepairWindow failed: {e.Message}"); }
+        catch (Exception e) { Svc.Log.Verbose($"[Repair] Callback.Fire close failed: {e.Message}"); }
         return false; // not confirmed closed yet
     }
 

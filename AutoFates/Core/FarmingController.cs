@@ -38,6 +38,16 @@ public sealed unsafe class FarmingController
     // more gems than we had when the last session ended.
     private int _gemCountAfterLastShop = -1;
 
+    // Re-open the Shared FATE window to refresh data every 5 completed fates.
+    private int _fatesSinceFateDataRefresh;
+
+    // The farming state we were in before diverting to gemstone shopping. When shopping completes
+    // we return directly to this (fate grinding / chocobo loop) instead of routing back through the
+    // maintenance check, which would otherwise immediately re-enter the shop.
+    // After shopping we always return to SelectingZone — we're standing in the VENDOR's zone, so we
+    // must re-pick a farming zone for the current mode and travel back, not look for fates here.
+    private FarmState _stateBeforeShop = FarmState.SelectingZone;
+
     // Zone dwell: when we last saw an active FATE in the current zone. We stay and wait for FATEs
     // to respawn rather than zone-hopping the instant a zone is empty.
     private long _lastFateSeenMs;
@@ -72,10 +82,31 @@ public sealed unsafe class FarmingController
         _zoneFatesDone.Clear();
         _dwellZone = 0;
         _lastFateSeenMs = Environment.TickCount64;
-        State = FarmState.SelectingZone;
-        StatusText = "Starting...";
+        // Reset the shopping latch so we re-evaluate buying fresh on every Start.
+        _gemCountAfterLastShop = -1;
+
+        // ON START: open the Shared FATE window once to (re)populate the tracker cache. Invalidating
+        // forces EnsureData to re-open, read, and spam-close it on the next ticks.
+        _fatesSinceFateDataRefresh = 0;
+        Features.SharedFateTracker.RefreshData(force: true);
+
+        // ON START: if we already have the gemstones (>= threshold) and we still need items (any
+        // enabled entry's inventory count is below its target), go buy immediately before farming.
+        // Otherwise start the normal zone-selection loop.
+        if (GemstoneShopper.ShouldShop(C))
+        {
+            _stateBeforeShop = FarmState.SelectingZone;
+            State = FarmState.GemstoneShopping;
+            StatusText = "Starting — buying gemstone items first...";
+            Svc.Chat.Print("[AutoFates] Farming started — buying gemstone items first.");
+        }
+        else
+        {
+            State = FarmState.SelectingZone;
+            StatusText = "Starting...";
+            Svc.Chat.Print("[AutoFates] Farming started.");
+        }
         IPCManager.StartCombat(C);
-        Svc.Chat.Print("[AutoFates] Farming started.");
         Svc.Log.Information("[AutoFates] Started in mode " + C.Mode);
     }
 
@@ -86,9 +117,10 @@ public sealed unsafe class FarmingController
         LastStopReason = reason;
         State = FarmState.Stopped;
         StatusText = $"Stopped ({reason})";
-        IPCManager.StopCombat(C);
         Navigator.Stop();
-        if (BossModIPC.IsInstalled) BossModIPC.AiEnable(false);
+        // Hard-disable EVERY combat/movement IPC (rotation backends, BMR AI + follow/forbid flags,
+        // vnavmesh) regardless of the configured backend, so nothing keeps running after Stop.
+        IPCManager.ShutdownAll();
 
         Svc.Chat.Print($"[AutoFates] Farming stopped: {reason}.");
         Svc.Log.Information($"[AutoFates] Stopped: {reason}");
@@ -128,14 +160,13 @@ public sealed unsafe class FarmingController
             ChocoboManager.Tick(C);
 
         // In Shared FATEs mode, keep the in-game shared-fate tracker data loaded so zone
-        // skip/stop logic has something to read.
-        if (C.Mode == FarmingMode.SharedFates && (C.SharedFateSkipMaxed || C.StopWhenAllSharedFatesMaxed))
+        // skip/stop logic has something to read. EnsureData opens the window once (driven by the
+        // RefreshData(force) invalidation in Start), caches the data, then spam-closes it.
+        if (C.Mode == FarmingMode.SharedFates)
         {
+            // EnsureData opens the window once, caches the data, then spam-closes it. We only
+            // re-open (invalidate the cache) every 5 completed fates in OnFateFinished.
             Features.SharedFateTracker.EnsureData();
-            // Periodically re-open the Shared FATE window to repopulate stale per-zone data, but
-            // only while idle (not mid-fate) so we don't pop the window during combat.
-            if (State is FarmState.SelectingZone or FarmState.TravelingToZone)
-                Features.SharedFateTracker.RefreshData();
         }
 
         // SYNC ASAP: if we're physically standing inside a running fate and not yet level-synced,
@@ -152,6 +183,17 @@ public sealed unsafe class FarmingController
         {
             Navigator.Stop();
             State = FarmState.ClearingAggro;
+        }
+
+        // FOLLOW-LEADER: skip the whole zone-select/travel state machine. We don't pick or path to
+        // our own fates — just follow the leader wherever they go and run whatever fate we land in.
+        // (Still allow combat/collect handling once we're physically inside a fate.)
+        if (C.FollowPartyLeader
+            && State is not (FarmState.InFate or FarmState.CollectTurnIn or FarmState.ClearingAggro
+                             or FarmState.Maintenance or FarmState.ChocoboLeveling or FarmState.GemstoneShopping))
+        {
+            TickFollowLeader();
+            return;
         }
 
         switch (State)
@@ -391,6 +433,7 @@ public sealed unsafe class FarmingController
         _lastFateSeenMs = now;
 
         _targetFateId = best.Value.Fate.FateId;
+        _startedFateId = 0; // new fate -> allow the start-NPC talk again
         _collectTurnedIn = 0;
         _collectEstimatedNeeded = 0;
         State = FarmState.TravelingToFate;
@@ -454,6 +497,7 @@ public sealed unsafe class FarmingController
 
     // Tracks the fate-start NPC interaction so we don't spam-interact while dialogue is up.
     private long _fateNpcInteractedMs;
+    private ushort _startedFateId; // fate we've already done the start-NPC talk for (don't repeat)
 
     /// <summary>
     /// Some fates require talking to a start NPC (orange "!") to begin: it pops Talk dialogue we
@@ -525,6 +569,7 @@ public sealed unsafe class FarmingController
             FFXIVClientStructs.FFXIV.Client.Game.Control.TargetSystem.Instance()
                 ->InteractWithObject(((FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)npc.Address), false);
             _fateNpcInteractedMs = Environment.TickCount64;
+            _startedFateId = _targetFateId; // remember we've talked to this fate's start NPC
         }
         return true;
     }
@@ -574,19 +619,35 @@ public sealed unsafe class FarmingController
         var type = FateSelector.Classify(fate);
         StatusText = $"In fate: {fate.Name} ({type}) {fate.Progress}%";
 
-        // FATE-START NPC: some fates (escort, and many "guard"/defend fates) only begin once you
-        // talk to a start NPC carrying the orange "!". Classification (Rule/icon) is unreliable and
-        // often tags these as Battle, so DON'T gate solely on type. Instead, trigger NPC-start for
-        // ANY non-Collect fate while it hasn't progressed and there are no fate enemies to fight yet
-        // — that's the unambiguous "waiting for you to start it" state. COLLECT fates are excluded
-        // because their "!" NPC is the turn-in npc (handled in HandleCollectFate).
-        if (type != FateType.Collect)
+        // FATE-START NPC: some fates (escort, many "guard"/defend fates, AND collect fates) only
+        // begin once you talk to a start NPC carrying the orange "!". Classification (Rule/icon) is
+        // unreliable and often tags these as Battle, so DON'T gate solely on type. Trigger NPC-start
+        // while the fate hasn't progressed and there are no fate enemies to fight yet — the
+        // unambiguous "waiting for you to start it" state.
+        //
+        // COLLECT fates use the SAME "!" NPC for both starting AND turning in, so we only do the
+        // start-talk on the initial join: 0 progress AND we hold none of the collectable yet. Once
+        // we've started/collected, HandleCollectFate drives the turn-ins instead.
+        var dialogueOpen = ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>("Talk", out var t) && ECommons.GenericHelpers.IsAddonReady(t)
+                        || ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>("SelectYesno", out var y) && ECommons.GenericHelpers.IsAddonReady(y);
+        var notStarted = fate.Progress <= 0 && FateTargeting.CountFateEnemies(_targetFateId) == 0;
+        if (type == FateType.Collect)
         {
-            var notStarted = fate.Progress <= 0
-                             && FateTargeting.CountFateEnemies(_targetFateId) == 0;
-            var dialogueOpen = ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>("Talk", out var t) && ECommons.GenericHelpers.IsAddonReady(t)
-                            || ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>("SelectYesno", out var y) && ECommons.GenericHelpers.IsAddonReady(y);
-            if ((notStarted || dialogueOpen) && TryStartFateViaNpc(fate)) return;
+            // Only intercept for the initial join. If a turn-in dialogue is mid-flow we still let it
+            // pass through here (clicking Talk/Yes is the same), but we must NOT block once items
+            // exist or progress has begun — that's handled by HandleCollectFate.
+            var collectItemId = FateSelector.GetCollectItemId(fate);
+            var haveItems = collectItemId != 0 && InventoryUtil.GetItemCount(collectItemId) > 0;
+            // Only on the very first join, and only if we haven't already talked to this fate's
+            // start NPC (the latch stops the accept->talk->accept loop).
+            var freshJoin = fate.Progress <= 0 && !haveItems && _startedFateId != _targetFateId;
+            if ((freshJoin || dialogueOpen) && TryStartFateViaNpc(fate)) return;
+        }
+        else
+        {
+            // Latch prevents re-talking to a start NPC we've already engaged (accept loop).
+            var canStart = notStarted && _startedFateId != _targetFateId;
+            if ((canStart || dialogueOpen) && TryStartFateViaNpc(fate)) return;
         }
 
         // Keep ourselves inside the fate ring if we've drifted out. Don't do this when the combat
@@ -696,67 +757,90 @@ public sealed unsafe class FarmingController
 
         if (target == null)
         {
-            // No fate mobs nearby. The fate may be a boss/collect/defend lull — move toward the
-            // fate center to find action (unless BMR is actively repositioning us).
+            // No fate mobs nearby. Move toward the fate center to find action. Do this even under
+            // BMR (taking movement over) — BMR won't wander to find un-aggroed mobs on its own.
             if (!ECommons.GenericHelpers.IsOccupied()
                 && Vector3.Distance(me.Position, fate.Position) > fate.Radius * 0.4f)
             {
+                if (BmrMovementActive() && IPCManager.BmrInstalled)
+                    IPCManager.SetBmrMovement(false);
                 Navigator.MoveTo(C, fate.Position, Math.Max(2f, fate.Radius * 0.4f), allowMount: false);
             }
             return;
         }
 
-        // MASS PULL: if enabled and we don't yet have a healthy pile gathered on us, go grab more.
-        // Rule: we want at least wantCount fate enemies within gatherRange of us. While under that,
-        // walk to the nearest UNgathered enemy to body-pull it into the pile — but only if it's
-        // within leashRange (4y). We DON'T sprint across the whole fate chasing lone stragglers:
-        // once the nearest ungathered enemy is beyond the leash, we stop and fight what we have.
+        // MASS PULL (AutoDuty KillInRange model): grab the aggro of every fate enemy in range (up to
+        // a cap), then stop and let the rotation/AI AOE the pile down. We measure the pile by how
+        // many fate enemies are actually AGGROED onto us (in combat, targeting us/our chocobo) —
+        // proximity alone isn't a pull. While under the cap and there's an un-aggroed enemy in
+        // range, we path to it to body-pull it. Once capped (or nothing left un-aggroed in range),
+        // we hold position and fight.
+        //
+        // Unlike normal in-fate movement, the pull DOES path even when BMR owns movement — exactly
+        // like AutoDuty, which force-stops vnav once engaged but still drives toward un-aggroed
+        // mobs. We briefly take movement from BMR for the pull, then hand it back when the pile is
+        // full so BMR can resume AOE dodging.
         if (C.MassPull && !ECommons.GenericHelpers.IsOccupied())
         {
-            const int wantCount = 5;
-            const float gatherRange = 2f;
-            const float leashRange = 20f;       // how far we'll walk to body-pull a straggler
-            const float noSwapRange = 10f;      // keep current target if it's a valid enemy within this range
-            var gathered = FateTargeting.CountFateEnemiesWithin(_targetFateId, gatherRange);
-            if (gathered < wantCount)
+            var maxPile = C.MassPullMaxPile;        // never try to hold more than this many at once
+            var pullRange = C.MassPullRange;        // only pull enemies within this radius of us
+            var pileRange = C.MassPullRange + 5f;   // count aggroed mobs slightly beyond pull radius
+
+            var aggroed = FateTargeting.CountAggroedFateEnemies(_targetFateId, pileRange);
+            if (aggroed < maxPile)
             {
-                var pull = FateTargeting.GetNearestUngatheredEnemy(_targetFateId, gatherRange, leashRange);
+                var pull = FateTargeting.GetNearestUnaggroedFateEnemy(_targetFateId, pullRange);
                 if (pull != null)
                 {
-                    // IMPORTANT for casters/ranged: do NOT yank the target while we're mid-cast —
-                    // changing target cancels the cast. Also don't auto-swap when our current target
-                    // is a valid fate enemy within noSwapRange (10y) — let the rotation keep working
-                    // it instead of constantly flipping targets among the pile.
+                    // Target the un-aggroed mob so the rotation lands a pull (ranged shot / approach),
+                    // but don't yank the target mid-cast (that cancels the cast).
                     var meCasting = Player.Object is { IsCasting: true };
-                    var curValid = Svc.Targets.Target is IBattleNpc cc
-                        && FateTargeting.IsAttackableEnemy(cc)
-                        && Vector3.Distance(me.Position, cc.Position) <= noSwapRange;
-                    if (!meCasting && !curValid)
+                    if (!meCasting)
                         Svc.Targets.Target = pull;
 
-                    // Walk toward the pull mob to body-aggro it, but don't stop the rotation: just
-                    // keep moving. (vnav move + backend cast happen in parallel.)
+                    // Path to it to body-pull. If BMR owns movement, take it over for the pull so
+                    // we actually walk to the mob (BMR won't chase un-aggroed adds on its own).
+                    if (BmrMovementActive() && IPCManager.BmrInstalled)
+                        IPCManager.SetBmrMovement(false);
+
                     if (Vector3.Distance(me.Position, pull.Position) > 1.5f)
                         Navigator.MoveTo(C, pull.Position, 1.2f, allowMount: false);
                     else
                         Navigator.Stop();
                     return;
                 }
-                // Nothing left ungathered (all enemies already on us, just not 5 of them) -> fight.
+                // Nothing un-aggroed within pull radius. DON'T stop here — fall through to the normal
+                // engage-walk below so we still navigate to the nearest fate enemy even if it's
+                // beyond the pull radius (mass pull only ADDS nearby-grabbing; it must never prevent
+                // reaching the actual target). Hand movement back to BMR first.
             }
-            // We have a full enough pile -> stop running, let the backend AoE them down.
-            Navigator.Stop();
-            return;
+            // Either the pile is full, or there's nothing left to pull nearby. Hand movement back to
+            // BMR (undo any pull takeover) and fall through to standard engage.
+            if (BmrMovementActive() && IPCManager.BmrInstalled)
+                IPCManager.SetBmrMovement(true);
         }
 
-        // Walk into melee/casting range of the target so the rotation backend (Wrath / RSR / BMR)
-        // can attack.
+        // Walk into melee/casting range of the target so the rotation backend can attack. We ALWAYS
+        // navigate to an out-of-range target ourselves — even under BMR — because BMR's AI won't
+        // chase a fate enemy that isn't aggroed onto us yet (that was the "doesn't navigate to mobs"
+        // regression). Like the mass-pull, we take movement from BMR while closing the gap, then
+        // hand it back once we're in range so BMR can resume AOE dodging.
         var dist = Vector3.Distance(me.Position, target.Position);
         var engageRange = Math.Max(2.5f, target.HitboxRadius + 2.5f);
         if (dist > engageRange && !ECommons.GenericHelpers.IsOccupied())
+        {
+            // Out of range -> close the distance. Take movement from BMR if it owns it.
+            if (BmrMovementActive() && IPCManager.BmrInstalled)
+                IPCManager.SetBmrMovement(false);
             Navigator.MoveTo(C, target.Position, engageRange, allowMount: false);
+        }
         else
+        {
+            // In range -> stop pathing and hand movement back to BMR for AOE dodging.
             Navigator.Stop();
+            if (BmrMovementActive() && IPCManager.BmrInstalled)
+                IPCManager.SetBmrMovement(true);
+        }
     }
 
     private bool BmrMovementActive() => IPCManager.BmrHandlesMovement(C);
@@ -823,6 +907,16 @@ public sealed unsafe class FarmingController
         }
 
         // --- 3) Otherwise gather: go pick up the nearest ground collectable. ---
+        // COMBAT FIRST: if we're in combat (mobs aggroed on us), finish the fight before collecting.
+        // Picking up items mid-combat gets us beaten on and interrupts pickups. Engage the attacker
+        // and bail this tick; we'll resume collecting once combat is clear.
+        if (InCombat() && FateTargeting.GetEnemiesAttackingMe().Count > 0)
+        {
+            EnsureCombatEngaged(fate);
+            StatusText = $"Collect: clearing combat before gathering";
+            return;
+        }
+
         var item = FateTargeting.GetNearestCollectable(_targetFateId);
         if (item != null)
         {
@@ -859,14 +953,25 @@ public sealed unsafe class FarmingController
     /// </summary>
     private unsafe void HandleRequestWindow(nint reqAddon, IFate fate, uint collectItemId)
     {
+        // Guard: the Request addon can be visible while its buttons/nodes aren't built yet. Touching
+        // rq.IsHandOverEnabled (-> HandOverButton->IsEnabled) on a null button NREs, so verify the
+        // addon is fully ready AND the hand-over button exists before reading it.
+        if (!ECommons.GenericHelpers.IsAddonReady((FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase*)reqAddon))
+            return;
+
         var rq = new ECommons.UIHelpers.AddonMasterImplementations.AddonMaster.Request(reqAddon);
 
+        bool handOverReady;
+        try { handOverReady = rq.HandOverButton != null && rq.IsHandOverEnabled; }
+        catch (Exception e) { Svc.Log.Verbose($"[Collect] Request not ready: {e.Message}"); return; }
+
         // If hand-over is enabled, the slot is filled -> click it.
-        if (rq.IsHandOverEnabled)
+        if (handOverReady)
         {
             if (EzThrottler.Throttle("AF_HandOver", 800))
             {
-                rq.HandOver();
+                try { rq.HandOver(); }
+                catch (Exception e) { Svc.Log.Verbose($"[Collect] HandOver failed: {e.Message}"); return; }
                 // Learn per-item progress from the delta after the hand-in lands (next ticks).
                 _collectTurnedIn += Math.Max(1, C.CollectInitialTurnIn);
             }
@@ -910,11 +1015,18 @@ public sealed unsafe class FarmingController
         Navigator.Stop();
         _yieldUntilMs = 0; // clear the smart-mix yield latch
 
-        // In Shared FATEs mode, re-open the Shared FATE window now to repopulate the per-zone
-        // progress that just changed from completing this fate, then close it. force:true bypasses
-        // the interval throttle so every completed fate refreshes the data.
+        // In Shared FATEs mode, re-open the Shared FATE window to repopulate per-zone progress, but
+        // only every 5 completed fates (opening the window is disruptive, so we don't do it every
+        // fate). EnsureData will re-capture and spam-close it on the following ticks.
         if (C.Mode == FarmingMode.SharedFates)
-            Features.SharedFateTracker.RefreshData(force: true);
+        {
+            _fatesSinceFateDataRefresh++;
+            if (_fatesSinceFateDataRefresh >= 5)
+            {
+                _fatesSinceFateDataRefresh = 0;
+                Features.SharedFateTracker.RefreshData(force: true);
+            }
+        }
 
         // Per-zone counters (manual mode quota).
         var terr = Svc.ClientState.TerritoryType;
@@ -928,6 +1040,7 @@ public sealed unsafe class FarmingController
         }
 
         _targetFateId = 0;
+        _startedFateId = 0;
 
         // If we're still in combat (we pulled stray non-fate enemies — possibly hitting our chocobo
         // rather than us), clear them before moving on so we don't get stuck.
@@ -998,32 +1111,64 @@ public sealed unsafe class FarmingController
     // ---------------------------------------------------------------- follow leader
     private void TickFollowLeader()
     {
-        StatusText = "Following party leader";
-
         if (Svc.Party.Length == 0)
         {
+            StatusText = "Follow: not in a party";
             if (EzThrottler.Throttle("AF_NoParty", 8000))
-                Svc.Chat.PrintError("[AutoFates] Follow-leader enabled but you are not in a party.");
+                Svc.Log.Information($"[Follow] Not in a party (Party.Length=0). LeaderIdx={Svc.Party.PartyLeaderIndex}.");
             return;
         }
 
-        // Prefer BMR's native follow if BMR handles movement.
-        if (BmrMovementActive())
-        {
-            var leaderIdx = Svc.Party.PartyLeaderIndex;
-            if (EzThrottler.Throttle("AF_BmrFollow", 5000))
-                BossModIPC.AiFollow((int)leaderIdx);
-            return;
-        }
-
-        // Manual follow via vnavmesh.
         var leader = GetPartyLeaderObject();
-        if (leader == null) return;
-        Navigator.MoveTo(C, leader.Position, C.FollowDistance);
+        var me = Player.Object;
 
-        // If a fate is active and we're inside it, sync.
+        // If WE are the leader (or the leader object is us), there's nobody to follow — just hold
+        // and let combat/sync handle whatever fate we're standing in.
+        if (leader == null || me == null || leader.GameObjectId == me.GameObjectId)
+        {
+            StatusText = leader == null ? "Follow: leader object not loaded (out of range?)" : "Follow: you are the leader";
+            if (EzThrottler.Throttle("AF_FollowSelf", 5000))
+                Svc.Log.Information($"[Follow] No distinct leader. Party.Length={Svc.Party.Length}, LeaderIdx={Svc.Party.PartyLeaderIndex}, leaderObj={(leader == null ? "null" : leader.Name.ToString())}.");
+            var f0 = FateSelector.GetCurrentFate();
+            if (f0 != null && C.AutoLevelSync) SyncToFate();
+            return;
+        }
+
+        // HAND OFF TO THE FATE MACHINE: if the leader has dropped us inside a running fate (and that
+        // fate type is enabled), stop following and run it via the normal InFate flow — which lands,
+        // dismounts, starts the fate via NPC if needed, syncs, and fights. When the fate ends,
+        // OnFateFinished sets State=SelectingFate, and the top-of-tick follow redirect resumes us
+        // here to follow the leader again.
         var fate = FateSelector.GetCurrentFate();
-        if (fate != null && C.AutoLevelSync) SyncToFate();
+        if (fate != null && (C.EnabledFateTypes & FateSelector.Classify(fate)) != 0)
+        {
+            Navigator.Stop();
+            _targetFateId = fate.FateId;
+            _startedFateId = 0;
+            _collectTurnedIn = 0;
+            _collectEstimatedNeeded = 0;
+            State = FarmState.InFate;
+            StatusText = $"Follow: entering fate {fate.Name}";
+            return;
+        }
+
+        var distToLeader = Vector3.Distance(me.Position, leader.Position);
+        StatusText = $"Following {leader.Name} ({distToLeader:0}y)";
+
+        // ALWAYS mount up while following (not in a fate) so we keep pace with the leader's mount.
+        // Mount but DON'T return — fall through to FollowMoveTo so vnav starts pathing (and takes
+        // off into flight) the same frame instead of waiting a tick.
+        if (!MountManager.IsMounted && MountManager.CanMountHere
+            && distToLeader > C.FollowDistance + 2f
+            && !ECommons.GenericHelpers.IsOccupied())
+        {
+            MountManager.Mount(C);
+        }
+
+        // ALWAYS use vnavmesh to chase the leader's LIVE position. (We deliberately do NOT use
+        // BMR's /bmrai follow here — that only works when BMR AI is enabled, which it isn't in
+        // follow mode, so it silently did nothing.)
+        Navigator.FollowMoveTo(C, leader.Position, C.FollowDistance);
     }
 
     private Dalamud.Game.ClientState.Objects.Types.IGameObject? GetPartyLeaderObject()
@@ -1031,7 +1176,18 @@ public sealed unsafe class FarmingController
         var idx = Svc.Party.PartyLeaderIndex;
         if (idx >= Svc.Party.Length) return null;
         var member = Svc.Party[(int)idx];
-        return member?.GameObject;
+        if (member == null) return null;
+
+        // member.GameObject is null when the leader isn't in the local object table yet. Fall back
+        // to resolving by the party member's EntityId/ObjectId against the live object table.
+        if (member.GameObject != null) return member.GameObject;
+
+        var wantEntity = member.EntityId; // entity id of the party member
+        foreach (var obj in Svc.Objects)
+        {
+            if (obj.EntityId == wantEntity) return obj;
+        }
+        return null;
     }
 
     // ---------------------------------------------------------------- maintenance gating
@@ -1058,6 +1214,10 @@ public sealed unsafe class FarmingController
         if (GemstoneShopper.ShouldShop(C)
             && (_gemCountAfterLastShop < 0 || Features.InventoryUtil.GetGemstoneCount() > _gemCountAfterLastShop))
         {
+            // Remember where we came from so we can return straight to it when shopping is done.
+            // Always return to SelectingZone after shopping — we'll be in the vendor's zone and need
+            // to re-pick + travel back to a farming zone for the current mode.
+            _stateBeforeShop = FarmState.SelectingZone;
             State = FarmState.GemstoneShopping;
             return true;
         }
@@ -1111,26 +1271,43 @@ public sealed unsafe class FarmingController
     {
         StatusText = "Gemstone shopping";
 
-        // If the shop addon is open, purchase; otherwise we need to reach the vendor.
+        // TOP-OF-TICK COMPLETION GUARD (works whether the shop is open or not): if every enabled
+        // buy entry has reached its target item count, we're DONE. Close the shop if it's still up,
+        // then go straight back to farming. This runs BEFORE the navigate/interact fall-through so
+        // we never re-open the shop after finishing.
+        var hasContinuous = C.GemstoneBuyList.Any(e => e.Enabled && e.TargetQuantity == 0);
+        if (!hasContinuous && GemstoneShopper.AllTargetsMet(C))
+        {
+            _gemCountAfterLastShop = Features.InventoryUtil.GetGemstoneCount();
+            if (GemstoneShopper.ShopOpen())
+            {
+                if (EzThrottler.Throttle("AF_CloseShop", 300))
+                    GemstoneShopper.CloseShop();
+                return; // wait for it to actually close before leaving
+            }
+            State = _stateBeforeShop;
+            return;
+        }
+
+        // If the shop addon is open, buy until done. FORCIBLE COMPLETION: the instant there's
+        // nothing left we can AND want to buy (every entry is at its target threshold or
+        // unaffordable), yank control back to whatever we were doing before. This check only runs
+        // while the shop is OPEN (item costs are only readable then) so we don't bail mid-travel.
         if (GemstoneShopper.ShopOpen())
         {
-            if (GemstoneShopper.PurchaseTick(C))
+            if (GemstoneShopper.BuyingComplete(C))
             {
-                // Done buying — close the shop window, retrying until it's actually gone (GBR does
-                // the same: a single Close() call can be missed mid-frame). Only leave the state
-                // once CloseShop confirms the addon is no longer visible.
+                _gemCountAfterLastShop = Features.InventoryUtil.GetGemstoneCount();
+                // Keep firing CloseShop until the window is actually gone, THEN leave the state.
+                // Leaving early would orphan an open shop window (the bug you saw).
                 if (EzThrottler.Throttle("AF_CloseShop", 300))
                 {
                     if (GemstoneShopper.CloseShop())
-                    {
-                        // Latch the current gem count so we don't immediately re-enter the shop
-                        // (continuous-buy entries always report "want more"). We'll only shop again
-                        // after farming raises our gem count above this.
-                        _gemCountAfterLastShop = Features.InventoryUtil.GetGemstoneCount();
-                        State = FarmState.SelectingZone;
-                    }
+                        State = _stateBeforeShop;
                 }
+                return;
             }
+            GemstoneShopper.PurchaseTick(C);
             return;
         }
 

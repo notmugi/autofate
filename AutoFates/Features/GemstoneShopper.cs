@@ -28,6 +28,43 @@ public static unsafe class GemstoneShopper
         => ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>(ShopAddon, out var a) && a->IsVisible;
 
     /// <summary>
+    /// Shopping is COMPLETE when, for every enabled buy entry, we either:
+    ///   - have reached/exceeded its target quantity (threshold met), OR
+    ///   - can no longer afford another unit of it (our gemstone count &lt; the item's cost).
+    /// When this is true the controller forcibly yanks state back to farming. We don't care about
+    /// the buy-threshold-to-START here; only whether there's anything left we CAN and WANT to buy.
+    /// </summary>
+    public static bool BuyingComplete(Configuration c)
+    {
+        // Only meaningful while the shop is open and its item list has populated. If the shop just
+        // opened and BasicShopItems is empty (it takes a few frames to fill), DO NOT report
+        // complete — that would bail before we ever buy anything.
+        if (!ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>(ShopAddon, out var addonPtr)
+            || addonPtr == null || !addonPtr->IsVisible || !ECommons.GenericHelpers.IsAddonReady(addonPtr))
+            return false;
+        AddonMaster.ShopExchangeCurrency master;
+        try { master = new AddonMaster.ShopExchangeCurrency((nint)addonPtr); }
+        catch { return false; }
+        var shopItems = master.BasicShopItems;
+        if (shopItems.Length == 0) return false; // list not populated yet -> keep waiting
+
+        var gems = InventoryUtil.GetGemstoneCount();
+        foreach (var entry in c.GemstoneBuyList.Where(e => e.Enabled))
+        {
+            var have = InventoryUtil.GetItemCount(entry.ItemId);
+            // Capped entry already satisfied -> nothing more wanted for this item.
+            if (entry.TargetQuantity > 0 && have >= entry.TargetQuantity) continue;
+
+            var shopItem = shopItems.FirstOrDefault(s => s.ItemId == entry.ItemId);
+            if (shopItem == null || shopItem.CostAmount == 0) continue; // not sold here -> ignore
+            if (gems >= shopItem.CostAmount) return false;              // want it AND can afford -> not done
+        }
+        return true; // every entry is either capped or unaffordable
+    }
+
+
+
+    /// <summary>
     /// Close the currency shop window — equivalent to pressing Escape. Calls the addon's Close()
     /// (fire-callback + hide), which is exactly what the Escape key triggers for this addon.
     /// </summary>

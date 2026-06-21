@@ -215,6 +215,52 @@ public static unsafe class FateTargeting
         return null;
     }
 
+    /// <summary>True if this fate enemy is aggroed onto us (or our chocobo) — i.e. in combat and
+    /// targeting us. These are the mobs already "pulled" onto our pile.</summary>
+    public static bool IsAggroedOnUs(IBattleNpc bnpc, ulong myId, ulong chocoId)
+        => bnpc.TargetObjectId == myId || (chocoId != 0 && bnpc.TargetObjectId == chocoId);
+
+    /// <summary>
+    /// Count fate enemies currently aggroed onto us/our chocobo within <paramref name="range"/>.
+    /// This is the real "pile" size for mass pulling (AutoDuty-style), unlike proximity counting.
+    /// </summary>
+    public static int CountAggroedFateEnemies(ushort fateId, float range)
+    {
+        var me = Player.Object;
+        if (me == null) return 0;
+        var myId = me.GameObjectId;
+        var chocoId = GetChocoboId();
+        var rSq = range * range;
+        var n = 0;
+        foreach (var e in GetFateEnemies(fateId))
+        {
+            if (Vector3.DistanceSquared(me.Position, e.Position) > rSq) continue;
+            if (IsAggroedOnUs(e, myId, chocoId)) n++;
+        }
+        return n;
+    }
+
+    /// <summary>
+    /// Mass-pull picker (AutoDuty KillInRange style): the nearest fate enemy within
+    /// <paramref name="pullRange"/> that is NOT yet aggroed onto us. We path to it to body-pull its
+    /// aggro, then move to the next. Returns null when every enemy in range is already on us.
+    /// </summary>
+    public static IBattleNpc? GetNearestUnaggroedFateEnemy(ushort fateId, float pullRange)
+    {
+        var me = Player.Object;
+        if (me == null) return null;
+        var myId = me.GameObjectId;
+        var chocoId = GetChocoboId();
+        var rSq = pullRange * pullRange;
+        foreach (var e in GetFateEnemies(fateId)) // nearest-first
+        {
+            if (Vector3.DistanceSquared(me.Position, e.Position) > rSq) continue;
+            if (IsAggroedOnUs(e, myId, chocoId)) continue; // already pulled
+            return e;
+        }
+        return null;
+    }
+
     /// <summary>
     /// Enemies that are currently attacking us (in combat, targeting the player), regardless of
     /// whether they belong to a fate. Used to clean up accidental pulls before moving on so we're
