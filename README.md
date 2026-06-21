@@ -1,5 +1,5 @@
 # Autofate
-![Autofate logo](https://raw.githubusercontent.com/notmugi/autofate/refs/heads/main/Autofate/images/icon.png)
+![Autofate logo](https://raw.githubusercontent.com/notmugi/autofate/refs/heads/main/Autofate/images/icon.png)  
 
 An FFXIV [Dalamud](https://github.com/goatcorp/Dalamud) plugin that automates FATE farming,
 built on puni.sh integrations (ECommons foundation, EzIPC inter-plugin communication).
