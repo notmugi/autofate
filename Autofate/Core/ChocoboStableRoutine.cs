@@ -58,17 +58,17 @@ public static unsafe class ChocoboStableRoutine
             return false;
         }
 
-        // Stable+train when the chocobo can't advance from FATEs anymore. TWO ways to detect that:
-        //   1) XpMaxed(): the XP bar reads full for the current rank.
-        //   2) XpStalled(): empirical — at the RANK CAP the game forces the XP bar to 0, so XpMaxed
-        //      can never fire. We instead observe that killing enemies grants the chocobo NO XP
-        //      (ChocoboManager.OnEnemyKilled tracks this), which means the cap is hit and only an
-        //      onion will let it advance.
-        // If neither holds, the chocobo is still climbing its bar from FATEs -> keep farming.
-        if (!ChocoboManager.XpMaxed() && !ChocoboManager.XpStalled)
+        // Stable+train ONLY when the empirical fate-based check says the chocobo can't advance:
+        // we sample its XP at fate start and compare at fate end (CheckXpGainAfterFate). If a whole
+        // fate granted NO XP (and we're below rank 20), the rank cap is hit -> XpStalled, feed an
+        // onion. We deliberately do NOT use XpMaxed() here: TRAINING fills the XP bar, so right
+        // after a feed+train the bar reads full for the current rank and XpMaxed() would fire
+        // immediately -> re-stable/re-train loop before a single fate runs. XpStalled is reset on
+        // feed and only re-arms after a full fate yields no gain, so it requires farming first.
+        if (!ChocoboManager.XpStalled)
         {
             if (EzThrottler.Throttle("AF_ChocoXpNotMax", 30_000))
-                Svc.Log.Information($"[Chocobo] XP not maxed/stalled ({ChocoboManager.CurrentXP()}/{ChocoboManager.MaxXP()}); keep farming before stabling.");
+                Svc.Log.Information($"[Chocobo] Not stalled yet ({ChocoboManager.CurrentXP()}/{ChocoboManager.MaxXP()}, rank={ChocoboManager.Rank()}); farm a fate before re-checking.");
             return false;
         }
 
@@ -88,8 +88,8 @@ public static unsafe class ChocoboStableRoutine
         // Interact). CRITICAL for the 19->20 case: feeding the final onion flips Rank() to 20
         // mid-sequence, so if we early-returned here we'd ABANDON the in-progress fetch and leave
         // the chocobo stuck in the stable. Once we're mid-flow (any step past Interact) we must
-        // always drive the sequence through to the fetch. Force-fetch also bypasses this entirely.
-        if (!_forceFetch && _step == StableStep.Interact && ChocoboManager.ReachedTargetLevel(c))
+        // always drive the sequence through to the fetch.
+        if (_step == StableStep.Interact && ChocoboManager.ReachedTargetLevel(c))
             return true;
 
         // If the stable entity is already loaded nearby, we're home — NEVER teleport. Go straight
@@ -149,23 +149,6 @@ public static unsafe class ChocoboStableRoutine
         _step = StableStep.Interact;
         _stepStartedUtc = DateTime.MinValue;
         _recovering = false;
-    }
-
-    // FORCE-FETCH: set when the possession failsafe re-enters the routine ONLY to fetch a chocobo
-    // that's still stuck in the stable (we already fed/trained it but the fetch never completed).
-    // Bypasses the "reached target level" early-out in Tick so we can fetch even at rank 20.
-    private static bool _forceFetch;
-
-    /// <summary>
-    /// Re-enter the routine in FETCH-ONLY mode (chocobo is still stabled and must be fetched out).
-    /// Resets the step machine; the ChooseStable "already stabled" branch will route Tend -> Fetch
-    /// -> Yes. Used by the controller's possession failsafe.
-    /// </summary>
-    public static void BeginForceFetch()
-    {
-        _forceFetch = true;
-        ResetSteps();
-        Svc.Log.Information("[Chocobo] Force-fetch: re-entering stable to fetch the chocobo back out.");
     }
 
     // Recovery latch: when a step wedges (or we fail to fetch), we must CLOSE every open stable
@@ -427,7 +410,6 @@ public static unsafe class ChocoboStableRoutine
                 if (TryGetSelectString(out var ss)) { CloseSelectString(ss); return false; }
                 _step = StableStep.Interact;
                 _stepStartedUtc = DateTime.MinValue;
-                _forceFetch = false; // fetch completed; clear force-fetch mode
                 Svc.Log.Information("[Chocobo] Stable cycle complete; resuming farming.");
                 return true;
             }

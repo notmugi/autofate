@@ -22,6 +22,10 @@ public sealed unsafe class FarmingController
     public bool Running { get; private set; }
     public FarmState State { get; private set; } = FarmState.Idle;
     public StopReason LastStopReason { get; private set; } = StopReason.None;
+    /// <summary>Last validation error from a failed Start (missing required plugin). Shown on Status tab.</summary>
+    public string LastStartError { get; private set; } = string.Empty;
+    /// <summary>Set when Start fails validation; the UI consumes this to switch to the Status tab once.</summary>
+    public bool ForceStatusTab { get; set; }
     public string StatusText { get; private set; } = "Idle";
     public SessionStats Stats { get; } = new();
 
@@ -102,8 +106,11 @@ public sealed unsafe class FarmingController
         if (!IPCManager.ValidateBackends(C, out var error))
         {
             Svc.Chat.PrintError($"[Autofate] {error}");
+            LastStartError = error;
+            ForceStatusTab = true; // tell the UI to jump to the Status tab so the user sees the error
             return;
         }
+        LastStartError = string.Empty;
 
         Running = true;
         LastStopReason = StopReason.None;
@@ -202,11 +209,6 @@ public sealed unsafe class FarmingController
             Features.SharedFateTracker.EnsureData();
         }
 
-        // POSSESSION FAILSAFE: after a stable cycle, confirm the chocobo got fetched back out. Must
-        // run in a fate zone (can't summon in housing). If it won't summon, force a fetch. Takes
-        // over (returns true) when it re-enters ChocoboLeveling to force-fetch.
-        if (TickVerifyChocoboFetched()) return;
-
         // SYNC ASAP: if we're physically standing inside a running fate and not yet level-synced,
         // sync immediately — handles the case where the plugin is started while already in a fate.
         if (C.AutoLevelSync && IsInsideAnyRunningFate())
@@ -275,13 +277,12 @@ public sealed unsafe class FarmingController
             return true;
         }
 
-        // Chocobo maxed -> stop. CRITICAL: do NOT fire this while we're still stabling or while the
-        // possession failsafe is armed. Feeding the final onion flips Rank to 20 mid-fetch; if we
-        // stopped here we'd halt the plugin before the fetch completes and leave the chocobo stuck
-        // in the stable (the failsafe couldn't recover it because we'd be stopped). Only stop once
-        // the chocobo is actually back in our possession.
+        // Chocobo maxed -> stop. CRITICAL: do NOT fire this while we're still stabling. Feeding the
+        // final onion flips Rank to 20 mid-fetch; if we stopped here we'd halt the plugin before the
+        // fetch completes and leave the chocobo stuck in the stable. Only stop once we've left the
+        // stable flow (the routine doesn't finish until the chocobo is fetched back out).
         if (C.StopAtChocoboMaxed && C.ChocoboCompanionEnabled && ChocoboManager.ReachedTargetLevel(C)
-            && State != FarmState.ChocoboLeveling && !_verifyChocoboFetched)
+            && State != FarmState.ChocoboLeveling)
         {
             Stop(StopReason.ChocoboMaxed);
             return true;
@@ -891,6 +892,9 @@ public sealed unsafe class FarmingController
     // code re-picked the target in three different places with three different rules every tick,
     // which is exactly why it flickered between targets and sometimes stood still pointing at one.
     private ulong _engagedTargetId;
+    // Sticky mass-pull body-pull target: the un-aggroed mob we're currently walking to in order to
+    // pull its aggro. Kept until it's on us / dies / leaves, so the move target can't oscillate.
+    private ulong _massPullTargetId;
 
     private void EnsureCombatEngaged(IFate fate)
     {
@@ -945,6 +949,7 @@ public sealed unsafe class FarmingController
             // No fate mobs right now. Drift toward the fate centre to find action (unless BMR drives
             // movement, in which case it'll reposition us itself).
             _engagedTargetId = 0;
+            _massPullTargetId = 0;
             Diag("Combat", "notarget", $"no fate enemy; driftToCenter={(!BmrMovementActive() && Vector3.Distance(me.Position, fate.Position) > fate.Radius * 0.4f)} distToCenter={Vector3.Distance(me.Position, fate.Position):F1} radius={fate.Radius:F1}");
             if (!BmrMovementActive() && Vector3.Distance(me.Position, fate.Position) > fate.Radius * 0.4f)
                 Navigator.MoveTo(C, fate.Position, Math.Max(2f, fate.Radius * 0.4f), allowMount: false);
@@ -969,10 +974,28 @@ public sealed unsafe class FarmingController
             var aggroed = FateTargeting.CountAggroedFateEnemies(_targetFateId);
             if (aggroed < C.MassPullMaxPile)
             {
-                var pull = FateTargeting.GetNearestUnaggroedFateEnemy(_targetFateId);
+                // STICKY pull target: keep walking to the SAME un-aggroed mob until it's actually on
+                // us (or dies/leaves), then pick the next. Re-picking nearest every tick would thrash
+                // when two candidates are similar distance. Sticky here mirrors the sticky combat
+                // target and is the other half of the anti-oscillation fix.
+                IBattleNpc? pull = null;
+                if (_massPullTargetId != 0
+                    && Svc.Objects.SearchById(_massPullTargetId) is IBattleNpc cand
+                    && FateTargeting.IsFateEnemy(cand, _targetFateId)
+                    && !FateTargeting.IsAggroedOnUs(cand, me.GameObjectId, FateTargeting.GetChocoboId()))
+                {
+                    pull = cand; // still valid + not yet pulled -> keep going for it
+                }
+                else
+                {
+                    pull = FateTargeting.GetNearestUnaggroedFateEnemy(_targetFateId);
+                    _massPullTargetId = pull?.GameObjectId ?? 0;
+                }
                 if (pull != null) moveTarget = pull;
             }
+            else _massPullTargetId = 0; // pile full -> stop body-pulling
         }
+        else _massPullTargetId = 0;
 
         // ---- MOVEMENT --------------------------------------------------------------------------
         // ALWAYS path to the move target when out of range — fate enemies must be reached at ANY
@@ -1385,41 +1408,29 @@ public sealed unsafe class FarmingController
         var me = Player.Object;
         if (me == null) { Navigator.Stop(); return; }
 
-        // INTERCEPT MODE (always on): the escort mobs all path toward the NPC to attack it. Rather
-        // than standing on the NPC and waiting, we run OUT to the nearest un-aggroed fate enemy and
-        // body-pull it — then return to the NPC so the aggroed mob (now chasing US) gets dragged
-        // back inward. NO distance limit: we intercept any of OUR fate's enemies regardless of how
-        // far they are. Once everything is already aggroed onto us, we fall through to gluing on the
-        // NPC (mobs follow us there).
+        // KILL-ANY-ENEMY mode: we don't body-pull mobs back to the NPC. If OUR fate has any enemy,
+        // go kill it wherever it is (no distance limit), then once they're all dead navigate back to
+        // the escort NPC. `threat` was already picked + re-asserted above (FateId-scoped), so just
+        // navigate into range of it and let the rotation kill it.
+        if (threat != null)
         {
-            var interceptee = FindEscortInterceptTarget(followPos);
-            if (interceptee != null)
+            _escortChasing = false; // not in NPC-follow mode while fighting
+            var distToMob = Vector3.Distance(me.Position, threat.Position);
+            var engage = Math.Max(2.5f, threat.HitboxRadius + 2.5f);
+            if (distToMob > engage)
             {
-                // Target it so the rotation opens up the moment we're in range, and body-pull it.
-                if (Svc.Targets.Target is not IBattleNpc it || it.GameObjectId != interceptee.GameObjectId)
-                    Svc.Targets.Target = interceptee;
-                FateTargeting.StartAutoAttack(interceptee);
-
-                var distToMob = Vector3.Distance(me.Position, interceptee.Position);
-                var engage = Math.Max(2.5f, interceptee.HitboxRadius + 2.5f);
-                if (distToMob > engage)
-                {
-                    _escortChasing = false; // we're not in NPC-glue mode while intercepting
-                    if (!ECommons.GenericHelpers.IsOccupied())
-                        Navigator.FollowMoveTo(C, interceptee.Position, engage);
-                    StatusText = $"Escort: intercepting {interceptee.Name}";
-                    return;
-                }
-                // In range — it's now aggroed onto us. Head back to the NPC to drag it inward; the
-                // next tick will pick the next un-aggroed mob (or glue to the NPC if none remain).
-                Navigator.FollowMoveTo(C, followPos, EscortNpcGlueStop);
-                StatusText = $"Escort: pulling {interceptee.Name} back to NPC";
-                return;
+                Navigator.FollowMoveTo(C, threat.Position, engage);
+                StatusText = $"Escort: killing {threat.Name}";
             }
+            else
+            {
+                Navigator.Stop(); // in range — stand and let the rotation finish it
+                StatusText = $"Escort: fighting {threat.Name}";
+            }
+            return;
         }
 
-        // GLUE TO NPC (default, and the intercept fall-through once all nearby mobs are pulled):
-        // stay on the NPC so any aggroed mobs cluster on it / on us. Hysteresis so we don't flap:
+        // NO ENEMIES LEFT: navigate back to / follow the escort NPC. Hysteresis so we don't flap:
         // start chasing past EscortNpcGlueStart, stop once within EscortNpcGlueStop. FollowMoveTo
         // re-issues as the NPC drifts.
         var distToNpc = Vector3.Distance(me.Position, followPos);
@@ -1439,30 +1450,6 @@ public sealed unsafe class FarmingController
     private const float EscortNpcGlueStop = 2.5f;
 
     /// <summary>
-    /// Pick the best un-aggroed fate enemy to intercept during an escort: the nearest one to US (so
-    /// we minimize travel). NO distance limit — we intercept any of OUR fate's enemies regardless of
-    /// how far they are. Enemies already aggroed onto us are skipped (already being dragged in).
-    /// Returns null when there's nothing left to run out for (→ glue to NPC).
-    /// </summary>
-    private IBattleNpc? FindEscortInterceptTarget(Vector3 npcPos)
-    {
-        var me = Player.Object;
-        if (me == null) return null;
-        var myId = me.GameObjectId;
-        var chocoId = FateTargeting.GetChocoboId();
-
-        IBattleNpc? best = null;
-        var bestSq = float.MaxValue;
-        foreach (var e in FateTargeting.GetFateEnemies(_targetFateId)) // nearest-to-us first
-        {
-            if (FateTargeting.IsAggroedOnUs(e, myId, chocoId)) continue;     // already pulled
-            var d = Vector3.DistanceSquared(me.Position, e.Position);
-            if (d < bestSq) { bestSq = d; best = e; }
-        }
-        return best;
-    }
-
-    /// <summary>
     /// Clear per-fate carry-over state. CRITICAL: escort/collect state (especially the cached escort
     /// NPC id) must be wiped whenever we move to a NEW fate, not only via OnFateFinished — an escort
     /// fate can end WITHOUT OnFateFinished (expired, abandoned, completed by other players). If the
@@ -1474,6 +1461,7 @@ public sealed unsafe class FarmingController
         _escortNpcId = 0;
         _escortChasing = false;
         _engagedTargetId = 0;
+        _massPullTargetId = 0;
         _collectInteractObjId = 0;
         _collectInteractCooldownMs = 0;
         _yieldUntilMs = 0;
@@ -1488,6 +1476,7 @@ public sealed unsafe class FarmingController
         Navigator.Stop();
         _yieldUntilMs = 0; // clear the smart-mix yield latch
         _engagedTargetId = 0; // drop the sticky combat target so the next fate re-selects fresh
+        _massPullTargetId = 0; // drop the sticky body-pull target too
         TextAdvanceIPC.Disable(); // release collect turn-in control (no-op if we never took it)
 
         // In Shared FATEs mode, re-open the Shared FATE window to repopulate per-zone progress, but
@@ -1749,72 +1738,18 @@ public sealed unsafe class FarmingController
     private void TickChocoboLeveling()
     {
         StatusText = "Chocobo leveling";
+        // The routine only returns true once the chocobo has actually been FETCHED back out (the
+        // fetch loop retries close->reinteract->Tend->Fetch->Yes until it succeeds). No possession
+        // check is needed here — the stable routine doesn't finish until the fetch is done.
         if (ChocoboStableRoutine.Tick(C))
         {
             // Stable cycle done — hand dialogue back to TextAdvance for normal fate/turn-in flow.
             TextAdvanceIPC.Enable();
-            // Routine finished. We can't verify possession HERE: we're in the housing district where
-            // the chocobo CANNOT be summoned, so IsSummoned() would always be false. Instead, arm the
-            // possession failsafe (VerifyChocoboFetched): once we're back in a fate zone we try to
-            // summon, and if that fails the chocobo is still stabled -> force-fetch.
-            _verifyChocoboFetched = true;
-            _verifyFetchSinceMs = 0;
             if (C.StopAtChocoboMaxed && ChocoboManager.ReachedTargetLevel(C))
                 Stop(StopReason.ChocoboMaxed);
             else
                 State = FarmState.SelectingZone;
         }
-    }
-
-    private bool _verifyChocoboFetched; // armed after a stable cycle: confirm the chocobo is in our possession
-    private long _verifyFetchSinceMs;   // when we entered a fate zone + started trying to summon (0 = not yet)
-    private const long VerifyFetchGraceMs = 12_000; // allow this long for a summon to succeed before force-fetching
-
-    /// <summary>
-    /// Possession failsafe (runs every tick while armed). We CANNOT check possession in the housing
-    /// district (the chocobo can't be summoned there). So once the stable cycle finishes and we're
-    /// back in an actual fate zone (TerritoryIntendedUse == 1): try to summon the chocobo. If it
-    /// summons, it's in our possession -> done. If it will NOT summon within a grace window, the
-    /// chocobo is still stuck in the stable -> go home and force-fetch it (close dialogues, Tend,
-    /// Fetch, Yes). Returns true if it took over control this tick (caller should not run normal flow).
-    /// </summary>
-    private bool TickVerifyChocoboFetched()
-    {
-        if (!_verifyChocoboFetched) return false;
-        if (!C.ChocoboLevelingEnabled) { _verifyChocoboFetched = false; return false; }
-
-        // Only meaningful in a zone where the chocobo CAN be summoned (open-world fate zones).
-        var terr = ECommons.GameHelpers.Player.Territory.ValueNullable;
-        var canSummonHere = terr != null && terr.Value.TerritoryIntendedUse.RowId == 1;
-        if (!canSummonHere) return false; // still in housing / loading — wait until we're in a fate zone
-
-        // Already summoned -> possession confirmed, disarm.
-        if (ChocoboManager.IsSummoned())
-        {
-            _verifyChocoboFetched = false;
-            Svc.Log.Information("[Chocobo] Possession confirmed (chocobo summoned); failsafe cleared.");
-            return false;
-        }
-
-        // Not summoned yet: try to summon, and start the grace timer on first attempt.
-        if (_verifyFetchSinceMs == 0) _verifyFetchSinceMs = Environment.TickCount64;
-        ChocoboManager.UseGysahlGreens(); // throttled internally; no-op if no greens
-
-        // Within the grace window, keep trying to summon.
-        if (Environment.TickCount64 - _verifyFetchSinceMs < VerifyFetchGraceMs)
-        {
-            StatusText = "Verifying chocobo fetched (summoning)";
-            return false;
-        }
-
-        // Grace expired and STILL not summoned -> the chocobo is stuck in the stable. Force-fetch it.
-        Svc.Log.Warning("[Chocobo] Chocobo failed to summon in a fate zone -> still stabled. Forcing fetch.");
-        _verifyChocoboFetched = false;
-        _verifyFetchSinceMs = 0;
-        ChocoboStableRoutine.BeginForceFetch();
-        TextAdvanceIPC.Disable(); // stable menus are driven manually, not via TextAdvance
-        State = FarmState.ChocoboLeveling;
-        return true;
     }
 
     /// <summary>Enter the gemstone-shopping state for a fresh visit (clears the per-visit latch).</summary>

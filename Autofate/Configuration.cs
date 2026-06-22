@@ -93,12 +93,11 @@ public sealed class Configuration
     public bool StopWhenAllSharedFatesMaxed = true;
 
     // ------------------------------------------------------------------ Combat backends
-    // Default to vnavmesh-only movement (Autofate drives targeting + positioning itself). This is
-    // the confirmed-working combo: navmesh handles travel, Autofate walks into range, and the
-    // rotation backend (Wrath/RSR/BMR) does the damage. BMR-AI movement is opt-in.
-    public CombatBackend MovementBackend = CombatBackend.BossModReborn; // movement + AOE
+    // Movement is ALWAYS our hybrid setup (vnavmesh handles travel + approach, BMR handles in-combat
+    // repositioning + AOE dodge). There is no movement-backend option — it's fixed. Only the damage
+    // rotation is configurable.
     public CombatBackend RotationBackend = CombatBackend.WrathCombo;    // damage rotation
-    public string BmrPreset = "Autofate"; // BMR preset to activate
+
 
     // ------------------------------------------------------------------ Party follow
     public bool FollowPartyLeader = false;

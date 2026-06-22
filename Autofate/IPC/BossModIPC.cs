@@ -69,6 +69,36 @@ public static class BossModIPC
         catch (Exception e) { Svc.Log.Verbose($"[BMR] ClearActive failed: {e.Message}"); return false; }
     }
 
+    /// <summary>
+    /// Activate the named autorotation preset, but ONLY if it isn't already active (change-guarded —
+    /// SetActive every tick would thrash the rotation). Works on EITHER fork (shared BossMod. IPC).
+    /// If the preset doesn't exist in BossMod yet, we CREATE it from our own bundled fate preset
+    /// (BossModPreset.Json) so the user never has to make one by hand — same mechanism AutoDuty/BoT
+    /// use (Presets.Create with serialized JSON), but our own fate-tuned module set.
+    /// </summary>
+    public static void EnsureActivePreset(string presetName)
+    {
+        if (string.IsNullOrWhiteSpace(presetName)) return;
+        try
+        {
+            if (GetActivePreset() == presetName) return; // already active
+
+            if (GetPreset(presetName) is null)
+            {
+                // Not present -> create our bundled fate preset under this name.
+                if (!CreatePreset(BossModPreset.Json(presetName), overwrite: true))
+                {
+                    if (ECommons.Throttlers.EzThrottler.Throttle("AF_BmrPresetCreateFail", 10_000))
+                        Svc.Log.Warning($"[BMR] Failed to create autorotation preset '{presetName}' in {DisplayName}.");
+                    return;
+                }
+                Svc.Log.Information($"[BMR] Created fate autorotation preset '{presetName}' in {DisplayName}.");
+            }
+            SetActivePreset(presetName);
+        }
+        catch (Exception e) { Svc.Log.Verbose($"[BMR] EnsureActivePreset failed: {e.Message}"); }
+    }
+
     public static string? GetActivePreset()
     {
         try { return Svc.PluginInterface.GetIpcSubscriber<string?>("BossMod.Presets.GetActive").InvokeFunc(); }

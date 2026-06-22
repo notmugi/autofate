@@ -53,27 +53,42 @@ public static class IPCManager
     {
         error = string.Empty;
 
-        if (c.RotationBackend == CombatBackend.None && c.MovementBackend == CombatBackend.None)
+        if (c.RotationBackend == CombatBackend.None)
         {
-            error = "No combat plugin selected. Choose a rotation and/or movement backend (BMR, Wrath, or RSR) in the Combat tab.";
+            error = "No rotation plugin selected. Choose a rotation backend (BMR, Wrath, or RSR) in the Combat tab.";
             return false;
         }
 
-        if (c.RotationBackend != CombatBackend.None && !IsBackendInstalled(c.RotationBackend))
+        if (!IsBackendInstalled(c.RotationBackend))
         {
             error = $"Selected rotation backend '{BackendName(c.RotationBackend)}' is not installed/loaded.";
             return false;
         }
 
-        if (c.MovementBackend != CombatBackend.None && !IsBackendInstalled(c.MovementBackend))
+        // Movement is the fixed hybrid (vnavmesh + BossMod/BMR AI), so both are required.
+        if (!NavmeshIPC.IsInstalled)
         {
-            error = $"Selected movement backend '{BackendName(c.MovementBackend)}' is not installed/loaded.";
+            error = "vnavmesh is required for navigation but is not installed/loaded.";
             return false;
         }
 
-        if (!NavmeshIPC.IsInstalled && !c.FollowPartyLeader && c.MovementBackend != CombatBackend.BossModReborn)
+        if (!BossModIPC.IsInstalled)
         {
-            error = "vnavmesh is required for navigation but is not installed/loaded.";
+            error = "BossMod (or BossMod Reborn) is required for in-combat movement / AOE dodging but is not installed/loaded.";
+            return false;
+        }
+
+        // Lifestream is required for travel/teleport between zones and home (chocobo stabling).
+        if (!LifestreamIPC.IsInstalled)
+        {
+            error = "Lifestream is required for travel/teleport but is not installed/loaded.";
+            return false;
+        }
+
+        // TextAdvance is required for all dialogue handling (fate start, collect turn-ins, cutscenes).
+        if (!TextAdvanceIPC.IsInstalled)
+        {
+            error = "TextAdvance is required for dialogue handling but is not installed/loaded.";
             return false;
         }
 
@@ -88,14 +103,15 @@ public static class IPCManager
         {
             case CombatBackend.WrathCombo: WrathComboIPC.Enable(); break;
             case CombatBackend.RotationSolverReborn: RotationSolverIPC.SetAuto(); break;
-            // TODO(WIP): BMR autorotation preset is greyed in the UI and not wired into the flow.
-            case CombatBackend.BossModReborn: BossModIPC.SetActivePreset(c.BmrPreset); break;
+            // BossMod/BMR autorotation: activate the user's named preset on whichever fork is loaded
+            // (the BossMod. IPC prefix is shared by both). Change-guarded inside EnsureActivePreset
+            // so we only re-issue SetActive when it isn't already the active preset.
+            case CombatBackend.BossModReborn: BossModIPC.EnsureActivePreset(BossModPreset.Name); break;
         }
 
-        // BMR movement backend: just turn the AI on; /bmrai handles approach, positioning,
-        // targeting, and AOE dodging itself.
-        if (c.MovementBackend == CombatBackend.BossModReborn)
-            BossModIPC.AiEnable(true);
+        // Movement is always the hybrid: turn BMR's AI on so it handles in-combat repositioning +
+        // AOE dodging (vnav handles travel/approach via Navigator).
+        BossModIPC.AiEnable(true);
 
         // Whenever BMR is in play (rotation OR movement/AI), push the FATE-scoping hint so BMR's
         // AutoTarget excludes mobs from fates we're not part of and respects our pull cap. Harmless
@@ -112,13 +128,12 @@ public static class IPCManager
     public static void ApplyBmrFateTargeting(Configuration c)
     {
         if (!BossModIPC.IsInstalled) return;
-        if (c.RotationBackend != CombatBackend.BossModReborn
-            && c.MovementBackend != CombatBackend.BossModReborn) return;
+        // BMR is always in play (it's the fixed movement/AOE backend), so always apply.
         if (!ECommons.Throttlers.EzThrottler.Throttle("AF_BmrFateTarget", 2000)) return;
         // MaxTargets 0 = unlimited; map "mass pull off" to unlimited so we don't artificially
         // throttle the rotation, and "mass pull on" to our configured pile cap.
         var maxTargets = c.MassPull ? Math.Max(1, c.MassPullMaxPile) : 0;
-        BossModIPC.ApplyFateTargeting(c.BmrPreset, maxTargets);
+        BossModIPC.ApplyFateTargeting(BossModPreset.Name, maxTargets);
     }
 
     public static void StopCombat(Configuration c)
@@ -130,8 +145,8 @@ public static class IPCManager
             case CombatBackend.BossModReborn: BossModIPC.ClearActivePreset(); break;
         }
 
-        if (c.MovementBackend == CombatBackend.BossModReborn)
-            BossModIPC.AiEnable(false);
+        // Movement is always BMR-AI hybrid -> always turn it off on stop.
+        BossModIPC.AiEnable(false);
     }
 
     /// <summary>
@@ -167,9 +182,10 @@ public static class IPCManager
         NavmeshIPC.Stop();
     }
 
-    /// <summary>Whether BMR is handling movement/AOE dodging right now.</summary>
+    /// <summary>Whether BMR is handling movement/AOE dodging right now. Movement is the fixed hybrid,
+    /// so this is true whenever BossMod/BMR is installed.</summary>
     public static bool BmrHandlesMovement(Configuration c)
-        => c.MovementBackend == CombatBackend.BossModReborn && BossModIPC.IsInstalled;
+        => BossModIPC.IsInstalled;
 
     /// <summary>Is BMR installed?</summary>
     public static bool BmrInstalled => BossModIPC.IsInstalled;

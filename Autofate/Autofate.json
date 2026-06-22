@@ -20,7 +20,7 @@
   "LoadSync": false,
   "CanUnloadAsync": false,
   "LoadPriority": 0,
-  "IconUrl": "",
+  "IconUrl": "https://raw.githubusercontent.com/notmugi/autofate/main/Autofate/images/icon.png",
   "AcceptsFeedback": false,
   "DalamudApiLevel": 15
 }

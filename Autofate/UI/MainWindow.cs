@@ -31,19 +31,23 @@ public sealed partial class MainWindow : Window
 
         DrawTab("Mode", DrawModeTab);
         DrawTab("Fate Engine", DrawFateEngineTab);
-        DrawTab("Combat", DrawCombatTab);
         DrawTab("Travel", DrawTravelTab);
         DrawTab("Chocobo", DrawChocoboTab);
         DrawTab("Consumables", DrawConsumablesTab);
         DrawTab("Repair", DrawRepairTab);
         DrawTab("Gemstones", DrawGemstoneTab);
         DrawTab("Stop Triggers", DrawStopTriggersTab);
-        DrawTab("Status", DrawStatusTab);
+
+        // If a failed Start asked us to surface the error, force-select the Status tab this frame.
+        var forceStatus = Controller.ForceStatusTab;
+        if (forceStatus) Controller.ForceStatusTab = false; // consume the one-shot
+        DrawTab("Status", DrawStatusTab, forceStatus);
     }
 
-    private static void DrawTab(string label, Action body)
+    private static void DrawTab(string label, Action body, bool forceSelected = false)
     {
-        using var tab = ImRaii.TabItem(label);
+        var flags = forceSelected ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
+        using var tab = ImRaii.TabItem(label, flags);
         if (!tab) return;
         using var child = ImRaii.Child($"##child_{label}", new Vector2(0, 0), false);
         body();

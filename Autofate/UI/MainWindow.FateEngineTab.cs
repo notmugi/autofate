@@ -6,6 +6,10 @@ public sealed partial class MainWindow
 {
     private void DrawFateEngineTab()
     {
+        // Combat section first (rotation backend + fixed hybrid movement).
+        DrawCombatSection();
+        ImGui.Separator();
+
         ImGui.TextWrapped("Tune how the plugin picks and runs FATEs. All FATE types are always run — use the blacklist below to skip specific FATEs.");
         ImGui.Separator();
 
@@ -88,12 +92,6 @@ public sealed partial class MainWindow
             }
             ImGui.Unindent();
         }
-
-        ImGui.Separator();
-        ImGui.TextUnformatted("Collect FATEs:");
-        ImGui.TextWrapped("Collect FATEs are handled automatically: the plugin gathers labeled "
-            + "ground items and hands them in to the FATE's objective NPC in batches until the FATE "
-            + "completes. No configuration required.");
 
         DrawFateBlacklist();
     }

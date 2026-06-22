@@ -9,6 +9,16 @@ public sealed partial class MainWindow
 {
     private void DrawStatusTab()
     {
+        // Surface a failed-Start error (missing required plugin) in red at the very top.
+        if (!string.IsNullOrEmpty(Controller.LastStartError))
+        {
+            ImGui.TextColored(new System.Numerics.Vector4(0.95f, 0.3f, 0.3f, 1f),
+                $"Cannot start: {Controller.LastStartError}");
+            ImGui.TextColored(new System.Numerics.Vector4(0.95f, 0.3f, 0.3f, 1f),
+                "Install/enable the missing plugin (see detection list below), then press START again.");
+            ImGui.Separator();
+        }
+
         var s = Controller.Stats;
         ImGui.TextUnformatted($"Running: {Controller.Running}");
         ImGui.TextUnformatted($"State: {Controller.State}");

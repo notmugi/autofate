@@ -249,15 +249,14 @@ public static unsafe class FateTargeting
     /// </summary>
     public static bool IsAggroedOnUs(IBattleNpc bnpc, ulong myId, ulong chocoId)
     {
-        if (bnpc.TargetObjectId == myId || (chocoId != 0 && bnpc.TargetObjectId == chocoId))
-            return true;
-        // Tolerance: in-combat fate mob hugging the pile counts as pulled.
-        var me = Player.Object;
-        if (me == null) return false;
-        var inCombat = (bnpc.StatusFlags & Dalamud.Game.ClientState.Objects.Enums.StatusFlags.InCombat) != 0;
-        if (!inCombat) return false;
-        const float pileRadius = 8f;
-        return Vector3.DistanceSquared(me.Position, bnpc.Position) <= pileRadius * pileRadius;
+        // DETERMINISTIC, position-INDEPENDENT: a mob is "on us" iff it is actually targeting us or
+        // our chocobo. We MUST NOT use a proximity/in-combat tolerance here: a mob another player is
+        // fighting is InCombat but targets THEM, so a distance-based check would flip its "pulled"
+        // state as we move toward/away from it — which made the mass-pull move-target oscillate
+        // between two mobs (target one, walk in, it flips to "pulled", pick another, walk away, it
+        // flips back, ...). Whether someone else is fighting it is irrelevant; only "does it target
+        // us" matters for pile counting.
+        return bnpc.TargetObjectId == myId || (chocoId != 0 && bnpc.TargetObjectId == chocoId);
     }
 
     /// <summary>
