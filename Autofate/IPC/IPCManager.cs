@@ -37,7 +37,8 @@ public static class IPCManager
 
     public static string BackendName(CombatBackend backend) => backend switch
     {
-        CombatBackend.BossModReborn => "BossMod Reborn",
+        // BossMod backend accepts EITHER fork; show whichever is actually loaded.
+        CombatBackend.BossModReborn => BossModIPC.DisplayName,
         CombatBackend.WrathCombo => "Wrath Combo",
         CombatBackend.RotationSolverReborn => "Rotation Solver Reborn",
         CombatBackend.None => "None",
@@ -95,6 +96,29 @@ public static class IPCManager
         // targeting, and AOE dodging itself.
         if (c.MovementBackend == CombatBackend.BossModReborn)
             BossModIPC.AiEnable(true);
+
+        // Whenever BMR is in play (rotation OR movement/AI), push the FATE-scoping hint so BMR's
+        // AutoTarget excludes mobs from fates we're not part of and respects our pull cap. Harmless
+        // no-op if the preset/module isn't available.
+        ApplyBmrFateTargeting(c);
+    }
+
+    /// <summary>
+    /// Tell BossMod's AutoTarget to prioritize the current FATE's mobs (and ignore foreign-fate
+    /// mobs) and cap MaxTargets at our mass-pull pile size. Works identically on either BossMod fork
+    /// (the AutoTarget FATE/MaxTargets tracks are the same). Only acts when BossMod is a configured
+    /// backend. Throttled so we don't hammer the IPC every frame.
+    /// </summary>
+    public static void ApplyBmrFateTargeting(Configuration c)
+    {
+        if (!BossModIPC.IsInstalled) return;
+        if (c.RotationBackend != CombatBackend.BossModReborn
+            && c.MovementBackend != CombatBackend.BossModReborn) return;
+        if (!ECommons.Throttlers.EzThrottler.Throttle("AF_BmrFateTarget", 2000)) return;
+        // MaxTargets 0 = unlimited; map "mass pull off" to unlimited so we don't artificially
+        // throttle the rotation, and "mass pull on" to our configured pile cap.
+        var maxTargets = c.MassPull ? Math.Max(1, c.MassPullMaxPile) : 0;
+        BossModIPC.ApplyFateTargeting(c.BmrPreset, maxTargets);
     }
 
     public static void StopCombat(Configuration c)
@@ -119,7 +143,11 @@ public static class IPCManager
     {
         // Rotation backends.
         if (WrathComboIPC.IsInstalled) WrathComboIPC.Disable();
-        if (RotationSolverIPC.IsInstalled) RotationSolverIPC.SetOff();
+        if (RotationSolverIPC.IsInstalled)
+        {
+            RotationSolverIPC.SetOff();
+            RotationSolverIPC.ResetModeCache(); // so next run re-issues "/rotation auto"
+        }
 
         // BossMod Reborn: clear preset, disable AI, and clear any follow/forbid flags we set.
         if (BossModIPC.IsInstalled)

@@ -6,17 +6,7 @@ public sealed partial class MainWindow
 {
     private void DrawFateEngineTab()
     {
-        ImGui.TextWrapped("Tune how the plugin picks and runs FATEs.");
-        ImGui.Separator();
-
-        // Fate type toggles (Collect is WIP: greyed and unselectable).
-        ImGui.TextUnformatted("Enabled FATE types:");
-        DrawFateTypeToggle("Battle", FateType.Battle);
-        DrawFateTypeToggle("Boss", FateType.Boss);
-        DrawFateTypeToggle("Defend", FateType.Defend);
-        DrawFateTypeToggle("Escort", FateType.Escort);
-        DrawDisabledFateTypeToggle("Collect", "WIP");
-
+        ImGui.TextWrapped("Tune how the plugin picks and runs FATEs. All FATE types are always run — use the blacklist below to skip specific FATEs.");
         ImGui.Separator();
 
         const float numWidth = 90f;
@@ -79,11 +69,6 @@ public sealed partial class MainWindow
             ImGui.Unindent();
         }
 
-        var safe = C.SafeDistance;
-        if (ImGui.SliderFloat("Safe distance from non-fate enemies (yalms)", ref safe, 0, 30))
-        {
-            C.SafeDistance = safe; Save();
-        }
 
         ImGui.Separator();
         ImGui.TextUnformatted("Party:");
@@ -92,7 +77,7 @@ public sealed partial class MainWindow
         {
             C.FollowPartyLeader = followLeader; Save();
         }
-        ImGui.SameLine(); Help("Instead of picking and pathing to our own FATEs, just follow the party leader and run whatever FATE they drop us in. Good for multiboxing or farming with friends. Uses BMR's native follow when BMR handles movement, otherwise vnavmesh.");
+        ImGui.SameLine(); Help("Instead of picking and pathing to our own FATEs, just follow the party leader and run whatever FATE they drop us in. Good for multiboxing or farming with friends. Uses BossMod's native follow when BossMod handles movement, otherwise vnavmesh.");
         if (C.FollowPartyLeader)
         {
             ImGui.Indent();
@@ -106,17 +91,9 @@ public sealed partial class MainWindow
 
         ImGui.Separator();
         ImGui.TextUnformatted("Collect FATEs:");
-        // WIP: Collect turn-in input greyed out.
-        using (Dalamud.Interface.Utility.Raii.ImRaii.Disabled())
-        {
-            var initial = C.CollectInitialTurnIn;
-            ImGui.SetNextItemWidth(90f);
-            if (ImGui.InputInt("Initial turn-in batch", ref initial))
-            {
-                C.CollectInitialTurnIn = Math.Clamp(initial, 1, 99);
-                Save();
-            }
-        }
+        ImGui.TextWrapped("Collect FATEs are handled automatically: the plugin gathers labeled "
+            + "ground items and hands them in to the FATE's objective NPC in batches until the FATE "
+            + "completes. No configuration required.");
 
         DrawFateBlacklist();
     }
@@ -162,30 +139,6 @@ public sealed partial class MainWindow
                 }
             }
         }
-    }
-
-    private void DrawFateTypeToggle(string label, FateType flag)
-    {
-        var on = (C.EnabledFateTypes & flag) != 0;
-        if (ImGui.Checkbox(label, ref on))
-        {
-            if (on) C.EnabledFateTypes |= flag;
-            else C.EnabledFateTypes &= ~flag;
-            Save();
-        }
-        ImGui.SameLine();
-    }
-
-    // Greyed-out, unselectable fate-type toggle (WIP types).
-    private void DrawDisabledFateTypeToggle(string label, string why)
-    {
-        using (Dalamud.Interface.Utility.Raii.ImRaii.Disabled())
-        {
-            var off = false;
-            ImGui.Checkbox(label, ref off);
-        }
-        ImGui.SameLine();
-        ImGui.TextDisabled($"({why})");
     }
 
     private static void Help(string text)

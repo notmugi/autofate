@@ -53,7 +53,6 @@ public sealed class Configuration
     public float MountDistanceThreshold = 30f;
 
     // ------------------------------------------------------------------ Fate engine
-    public FateType EnabledFateTypes = FateType.Battle | FateType.Boss | FateType.Defend | FateType.Escort;
     /// <summary>Continue running fates up to this many levels above the player's level.</summary>
     public int LevelsAbovePlayer = 2;
     /// <summary>Ignore fates with less than this many seconds remaining.</summary>
@@ -66,8 +65,6 @@ public sealed class Configuration
     public bool MassPull = true;
     /// <summary>Max number of enemies to hold aggro on at once during mass pull.</summary>
     public int MassPullMaxPile = 2;
-    /// <summary>Keep this distance (yalms) from non-fate enemies to avoid aggro.</summary>
-    public float SafeDistance = 8f;
     /// <summary>Self AOE dodging when not using BMR for movement.</summary>
 
     /// <summary>FATE names we will never navigate to, regardless of mode / enabled fate types.</summary>

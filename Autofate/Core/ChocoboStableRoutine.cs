@@ -58,18 +58,21 @@ public static unsafe class ChocoboStableRoutine
             return false;
         }
 
-        // Only stable+train once the chocobo's XP bar is FULL for its current rank. Stabling does
-        // not earn XP — the chocobo must first cap its bar from FATEs. If we entered the stable loop
-        // while XP was still climbing, we'd interrupt farming to train a chocobo that can't advance.
-        // (Reads CompanionInfo.CurrentXP vs LevelMaxXP.)
-        if (!ChocoboManager.XpMaxed())
+        // Stable+train when the chocobo can't advance from FATEs anymore. TWO ways to detect that:
+        //   1) XpMaxed(): the XP bar reads full for the current rank.
+        //   2) XpStalled(): empirical — at the RANK CAP the game forces the XP bar to 0, so XpMaxed
+        //      can never fire. We instead observe that killing enemies grants the chocobo NO XP
+        //      (ChocoboManager.OnEnemyKilled tracks this), which means the cap is hit and only an
+        //      onion will let it advance.
+        // If neither holds, the chocobo is still climbing its bar from FATEs -> keep farming.
+        if (!ChocoboManager.XpMaxed() && !ChocoboManager.XpStalled)
         {
             if (EzThrottler.Throttle("AF_ChocoXpNotMax", 30_000))
-                Svc.Log.Information($"[Chocobo] XP not maxed ({ChocoboManager.CurrentXP()}/{ChocoboManager.MaxXP()}); keep farming before stabling.");
+                Svc.Log.Information($"[Chocobo] XP not maxed/stalled ({ChocoboManager.CurrentXP()}/{ChocoboManager.MaxXP()}); keep farming before stabling.");
             return false;
         }
 
-        // We have onions, we're under target level, and XP is capped -> stable now.
+        // We have onions, we're under target level, and the chocobo can't advance without training -> stable now.
         return true;
     }
 
@@ -81,7 +84,12 @@ public static unsafe class ChocoboStableRoutine
     /// </summary>
     public static bool Tick(Configuration c)
     {
-        if (ChocoboManager.ReachedTargetLevel(c))
+        // Early-out when already at target level — BUT ONLY at the start of a cycle (_step ==
+        // Interact). CRITICAL for the 19->20 case: feeding the final onion flips Rank() to 20
+        // mid-sequence, so if we early-returned here we'd ABANDON the in-progress fetch and leave
+        // the chocobo stuck in the stable. Once we're mid-flow (any step past Interact) we must
+        // always drive the sequence through to the fetch. Force-fetch also bypasses this entirely.
+        if (!_forceFetch && _step == StableStep.Interact && ChocoboManager.ReachedTargetLevel(c))
             return true;
 
         // If the stable entity is already loaded nearby, we're home — NEVER teleport. Go straight
@@ -140,16 +148,54 @@ public static unsafe class ChocoboStableRoutine
     {
         _step = StableStep.Interact;
         _stepStartedUtc = DateTime.MinValue;
+        _recovering = false;
     }
+
+    // FORCE-FETCH: set when the possession failsafe re-enters the routine ONLY to fetch a chocobo
+    // that's still stuck in the stable (we already fed/trained it but the fetch never completed).
+    // Bypasses the "reached target level" early-out in Tick so we can fetch even at rank 20.
+    private static bool _forceFetch;
+
+    /// <summary>
+    /// Re-enter the routine in FETCH-ONLY mode (chocobo is still stabled and must be fetched out).
+    /// Resets the step machine; the ChooseStable "already stabled" branch will route Tend -> Fetch
+    /// -> Yes. Used by the controller's possession failsafe.
+    /// </summary>
+    public static void BeginForceFetch()
+    {
+        _forceFetch = true;
+        ResetSteps();
+        Svc.Log.Information("[Chocobo] Force-fetch: re-entering stable to fetch the chocobo back out.");
+    }
+
+    // Recovery latch: when a step wedges (or we fail to fetch), we must CLOSE every open stable
+    // dialogue BEFORE re-interacting — re-interacting on top of an open menu races it and wedges
+    // again. While this is set, DriveStableMenus closes dialogues until clean, then resumes at
+    // Interact (which re-opens the menu -> Tend -> Fetch -> Yes via the normal step flow).
+    private static bool _recovering;
 
     private static bool DriveStableMenus(Configuration c)
     {
-        // Safety timeout: if a step wedges for 20s, reset to Interact.
+        // Safety timeout: if a step wedges for 20s, RECOVER cleanly. Recovery closes all open stable
+        // dialogues first, THEN re-interacts — never re-interacts on top of an open menu.
         if (_stepStartedUtc != DateTime.MinValue && DateTime.UtcNow - _stepStartedUtc > TimeSpan.FromSeconds(20))
         {
-            Svc.Log.Warning($"[Chocobo] Stable step {_step} timed out; restarting interaction.");
-            _step = StableStep.Interact;
-            _stepStartedUtc = DateTime.MinValue;
+            Svc.Log.Warning($"[Chocobo] Stable step {_step} timed out; closing dialogues and restarting.");
+            _recovering = true;
+            _stepStartedUtc = DateTime.UtcNow; // reset the timer for the recovery itself
+        }
+
+        // RECOVERY: close every open stable dialogue, then resume at Interact once nothing is open.
+        if (_recovering)
+        {
+            if (CloseAllStableDialogues()) // true once no stable dialogue is visible
+            {
+                _recovering = false;
+                _step = StableStep.Interact;
+                _stepStartedUtc = DateTime.MinValue;
+                Svc.Log.Information("[Chocobo] Dialogues closed; re-interacting with stable.");
+            }
+            return false;
         }
 
         switch (_step)
@@ -298,7 +344,17 @@ public static unsafe class ChocoboStableRoutine
                         {
                             Svc.Log.Information($"[Chocobo] Context entry '{e.Text}' -> reward {feedItem}.");
                             e.Select();
-                            Advance(StableStep.FetchTend);
+                            // Onion fed -> rank cap raised. Clear the empirical XP-stall tracking so
+                            // we don't immediately re-trigger; the chocobo can earn XP again now.
+                            ChocoboManager.ResetXpStallTracking();
+                            // After feeding there is a short cutscene, then the game AUTOMATICALLY
+                            // reopens the HousingMyChocobo (Train/Fetch) menu. So go STRAIGHT to
+                            // FetchSelect, which just waits for that menu (returns false through the
+                            // cutscene), fires Fetch (row 3), then clicks Yes on the confirmation.
+                            // We must NOT route through FetchTend here: its re-interact fallback
+                            // would fire in the gap between the cutscene ending and the menu
+                            // reopening, racing the auto-reopened menu and wedging the step.
+                            Advance(StableStep.FetchSelect);
                             return false;
                         }
                     }
@@ -321,8 +377,21 @@ public static unsafe class ChocoboStableRoutine
 
             case StableStep.FetchTend:
             {
-                // Feeding closed the menu. Re-interact and pick "Tend to my Chocobo" again to get
-                // back to the HousingMyChocobo menu so we can Fetch (withdraw from the stable).
+                // After Train+Reward, the game returns DIRECTLY to the HousingMyChocobo menu (the
+                // Train/Feed/Fetch list) — it does NOT drop back to a SelectString. So if that menu
+                // is already open, skip straight to Fetch. (This is the post-feed path that wedged:
+                // we were waiting for a SelectString that never comes and trying to ReinteractStable
+                // against an already-open menu, which can't interact -> 20s timeout loop.)
+                if (HousingChocoboReady())
+                {
+                    StatusText("Fetching chocobo (menu already open)");
+                    Advance(StableStep.FetchSelect);
+                    return false;
+                }
+
+                // Otherwise the menu DID close (e.g. we resumed here from ChooseStable's
+                // already-stabled branch). Re-interact and pick "Tend to my Chocobo" to reopen the
+                // HousingMyChocobo menu so we can Fetch.
                 if (!TryGetSelectString(out _))
                 {
                     if (!ReinteractStable()) return false;
@@ -358,6 +427,7 @@ public static unsafe class ChocoboStableRoutine
                 if (TryGetSelectString(out var ss)) { CloseSelectString(ss); return false; }
                 _step = StableStep.Interact;
                 _stepStartedUtc = DateTime.MinValue;
+                _forceFetch = false; // fetch completed; clear force-fetch mode
                 Svc.Log.Information("[Chocobo] Stable cycle complete; resuming farming.");
                 return true;
             }
@@ -455,6 +525,35 @@ public static unsafe class ChocoboStableRoutine
     private static bool HousingChocoboReady()
         => ECommons.GenericHelpers.TryGetAddonByName<AtkBase>("HousingMyChocobo", out var a)
            && ECommons.GenericHelpers.IsAddonReady(a);
+
+    // Every addon the stable flow can leave open. We close ALL of them during recovery so a
+    // re-interact never lands on top of a lingering menu.
+    private static readonly string[] StableDialogueAddons =
+        { "SelectYesno", "HousingMyChocobo", "SelectIconString", "SelectString", "ContextMenu" };
+
+    /// <summary>
+    /// Close EVERY open stable-related dialogue using the proven repair/shared-fate pattern: fire
+    /// ONLY the cancel callback (-1) and let the caller retry until nothing is visible. Do NOT call
+    /// Close(true) — it tears down the addon's callback state so the Fire lands on a half-dead addon
+    /// and nothing happens. Returns true once none of the stable dialogues are visible.
+    /// </summary>
+    private static bool CloseAllStableDialogues()
+    {
+        var anyVisible = false;
+        foreach (var name in StableDialogueAddons)
+        {
+            if (ECommons.GenericHelpers.TryGetAddonByName<AtkBase>(name, out var a) && a != null && a->IsVisible)
+            {
+                anyVisible = true;
+                if (EzThrottler.Throttle($"AF_StableCloseDlg_{name}", 300))
+                {
+                    try { Callback.Fire(a, true, -1); }
+                    catch (Exception e) { Svc.Log.Verbose($"[Chocobo] Close '{name}' failed: {e.Message}"); }
+                }
+            }
+        }
+        return !anyVisible;
+    }
 
     /// <summary>
     /// Fire a callback on the HousingMyChocobo addon to pick a list row.

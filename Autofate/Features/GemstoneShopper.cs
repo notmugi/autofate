@@ -44,23 +44,31 @@ public static unsafe class GemstoneShopper
 
             var shopItem = shopItems.FirstOrDefault(s => s.ItemId == entry.ItemId);
             if (shopItem == null || shopItem.CostAmount == 0) continue; // not sold here
+
+            // CONTINUOUS entries (target 0): only "want more" while we're still ABOVE the configured
+            // threshold. Once a visit drains us back to the threshold we consider continuous buying
+            // done for this trip — this mirrors ShouldShop() so the controller can't reopen-loop.
+            if (entry.TargetQuantity == 0 && gems <= c.GemstoneBuyThreshold) continue;
+
             if (gems >= shopItem.CostAmount) return false;              // want it and can afford
         }
-        return true; // every entry capped or unaffordable
+        return true; // every entry capped, unaffordable, or drained to threshold
     }
 
 
 
     /// <summary>
-    /// Close the gemstone shop window via AtkUnitBase.Close(true) (same as pressing Escape).
-    /// Returns true once it's no longer visible; caller should retry until then.
+    /// Close the gemstone shop window. Uses the proven repair/shared-fate pattern: fire ONLY the
+    /// cancel callback (-1) and retry until the addon is no longer visible. Do NOT call Close(true)
+    /// here — Close(true) tears down the addon's callback state so the Fire can land on a half-dead
+    /// addon and nothing happens. Returns true once it's gone; caller should retry until then.
     /// </summary>
     public static bool CloseShop()
     {
         if (!ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>(ShopAddon, out var addon)
             || addon == null || !addon->IsVisible)
             return true; // already closed
-        try { addon->Close(true); }
+        try { ECommons.Automation.Callback.Fire(addon, true, -1); }
         catch (Exception e) { Svc.Log.Verbose($"[Gemstone] CloseShop failed: {e.Message}"); }
         return false; // not confirmed closed yet
     }
@@ -76,15 +84,26 @@ public static unsafe class GemstoneShopper
         return true;
     }
 
-    /// <summary>Should we head to the vendor? (threshold reached and something still to buy)</summary>
+    /// <summary>
+    /// Should we head to the vendor? Symmetric with <see cref="BuyingComplete"/> so the controller
+    /// can't oscillate (open -> buy -> "done" -> ShouldShop still true -> reopen). We only go shop
+    /// when (a) shopping is enabled, (b) we hold at least the threshold in gemstones, AND (c) there
+    /// is something we both WANT and CAN afford:
+    ///   - a capped entry (TargetQuantity > 0) still under its target, or
+    ///   - a continuous entry (TargetQuantity == 0) — but ONLY while we're above the threshold.
+    /// Treating "above threshold" as the continuous-buy gate makes completion deterministic:
+    /// draining back down to the threshold during a visit ends the visit (see BuyingComplete).
+    /// </summary>
     public static bool ShouldShop(Configuration c)
     {
         if (!c.EnableGemstoneShopping) return false;
         if (c.GemstoneBuyList.Count == 0) return false;
-        if (InventoryUtil.GetGemstoneCount() < c.GemstoneBuyThreshold) return false;
-        // Continuous entries (target 0) always have something to buy; capped only if not yet met.
-        var hasContinuous = c.GemstoneBuyList.Any(e => e.Enabled && e.TargetQuantity == 0);
-        return hasContinuous || !AllTargetsMet(c);
+        var gems = InventoryUtil.GetGemstoneCount();
+        if (gems < c.GemstoneBuyThreshold) return false;
+        // A capped entry still under target -> definitely want to shop.
+        if (!AllTargetsMet(c)) return true;
+        // Otherwise the only reason to shop is a continuous entry, and we're above threshold.
+        return c.GemstoneBuyList.Any(e => e.Enabled && e.TargetQuantity == 0);
     }
 
     /// <summary>

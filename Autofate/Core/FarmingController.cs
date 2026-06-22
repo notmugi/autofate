@@ -27,6 +27,17 @@ public sealed unsafe class FarmingController
 
     private Configuration C => Plugin.C;
 
+    // ---------------------------------------------------------------- diagnostics
+    // Throttled, area-tagged logging for our recurring problem areas (NPC interaction, combat,
+    // movement, collect, escort). Gated by the single C.VerboseLogging toggle (Status tab). Each
+    // area is throttled by a key so the log isn't flooded.
+    private void Diag(string area, string key, string msg)
+    {
+        if (!C.VerboseLogging) return;
+        if (!EzThrottler.Throttle($"AFDiag_{area}_{key}", 500)) return;
+        Svc.Log.Info($"[Diag/{area}] {msg}");
+    }
+
     // Active target fate + zone bookkeeping.
     private ushort _targetFateId;
     private uint _targetTerritory;
@@ -37,6 +48,14 @@ public sealed unsafe class FarmingController
     // the shop (continuous-buy entries always "want more"). We only shop again once we've farmed
     // more gems than we had when the last session ended.
     private int _gemCountAfterLastShop = -1;
+
+    // One-shot latch for the CURRENT shop visit. Set the instant a visit is judged complete
+    // (everything bought / drained to threshold / capped). While latched we NEVER re-interact the
+    // vendor — we only close the window and leave the state. Cleared on entry to a fresh visit
+    // (StartShopping) so the next legitimate trip works. This is the fix for the open->buy->close->
+    // re-interact->reopen loop: ShouldShop() can still read true after buying, so we must not let
+    // the NPC-interact fall-through fire again within the same visit.
+    private bool _shoppingDone;
 
     // Re-open the Shared FATE window to refresh data every 5 completed fates.
     private int _fatesSinceFateDataRefresh;
@@ -53,12 +72,22 @@ public sealed unsafe class FarmingController
     private long _lastFateSeenMs;
     private uint _dwellZone;
 
-    // Collect-fate hand-in math.
-    private int _collectTurnedIn;
-    private int _collectEstimatedNeeded;
-    private int _collectProgressBeforeTurnIn = -1; // fate.Progress sampled before a hand-in, to learn per-turnin value
-    // TODO(WIP): for the unfinished collect-fate turn-in math (progress % gained per item).
-    //private int _collectPerItemProgress;
+    // Collect-fate hand-in: we hand in fixed batches (DWD/BMR-style) rather than trying to "learn"
+    // the per-item progress value, which was fragile and never calibrated. Hold until we have a
+    // full batch, hand it in, repeat until the fate hits 100% (or runs dry of ground items).
+    private const int CollectBatchSize = 10; // collect fates reward "gold" at 10 turned in
+
+    // Tracks whether the rotation backend is currently running (so we toggle it only on transitions,
+    // not every tick). During collect HandIn/Pickup we STOP the backend so it doesn't fight us for
+    // the target — that target tug-of-war was the "flicks between the NPC and an enemy" bug.
+    private bool _combatBackendActive;
+    private void SetCombatBackend(bool active)
+    {
+        if (_combatBackendActive == active) return;
+        _combatBackendActive = active;
+        if (active) IPCManager.StartCombat(C);
+        else IPCManager.StopCombat(C);
+    }
 
     // Smart-mix yield latch: when BMR takes over for a dodge we keep yielding until danger has
     // been fully clear for this settle window, so vnav and BMR don't fight for control.
@@ -96,8 +125,7 @@ public sealed unsafe class FarmingController
         // Otherwise start the normal zone-selection loop.
         if (GemstoneShopper.ShouldShop(C))
         {
-            _stateBeforeShop = FarmState.SelectingZone;
-            State = FarmState.GemstoneShopping;
+            EnterShopping();
             StatusText = "Starting — buying gemstone items first...";
             Svc.Chat.Print("[Autofate] Farming started — buying gemstone items first.");
         }
@@ -107,7 +135,8 @@ public sealed unsafe class FarmingController
             StatusText = "Starting...";
             Svc.Chat.Print("[Autofate] Farming started.");
         }
-        IPCManager.StartCombat(C);
+        SetCombatBackend(true);
+        TextAdvanceIPC.Enable(); // hand ALL our dialogue (Talk/Yes-No/reward/cutscene/turn-in) to TextAdvance
         Svc.Log.Information("[Autofate] Started in mode " + C.Mode);
     }
 
@@ -122,6 +151,8 @@ public sealed unsafe class FarmingController
         // Hard-disable EVERY combat/movement IPC (rotation backends, BMR AI + follow/forbid flags,
         // vnavmesh) regardless of the configured backend, so nothing keeps running after Stop.
         IPCManager.ShutdownAll();
+        TextAdvanceIPC.Disable();     // release any collect turn-in control
+        _combatBackendActive = false; // re-sync the combat latch so the next Start re-issues
 
         Svc.Chat.Print($"[Autofate] Farming stopped: {reason}.");
         Svc.Log.Information($"[Autofate] Stopped: {reason}");
@@ -170,6 +201,11 @@ public sealed unsafe class FarmingController
             // re-open (invalidate the cache) every 5 completed fates in OnFateFinished.
             Features.SharedFateTracker.EnsureData();
         }
+
+        // POSSESSION FAILSAFE: after a stable cycle, confirm the chocobo got fetched back out. Must
+        // run in a fate zone (can't summon in housing). If it won't summon, force a fetch. Takes
+        // over (returns true) when it re-enters ChocoboLeveling to force-fetch.
+        if (TickVerifyChocoboFetched()) return;
 
         // SYNC ASAP: if we're physically standing inside a running fate and not yet level-synced,
         // sync immediately — handles the case where the plugin is started while already in a fate.
@@ -239,7 +275,13 @@ public sealed unsafe class FarmingController
             return true;
         }
 
-        if (C.StopAtChocoboMaxed && C.ChocoboCompanionEnabled && ChocoboManager.ReachedTargetLevel(C))
+        // Chocobo maxed -> stop. CRITICAL: do NOT fire this while we're still stabling or while the
+        // possession failsafe is armed. Feeding the final onion flips Rank to 20 mid-fetch; if we
+        // stopped here we'd halt the plugin before the fetch completes and leave the chocobo stuck
+        // in the stable (the failsafe couldn't recover it because we'd be stopped). Only stop once
+        // the chocobo is actually back in our possession.
+        if (C.StopAtChocoboMaxed && C.ChocoboCompanionEnabled && ChocoboManager.ReachedTargetLevel(C)
+            && State != FarmState.ChocoboLeveling && !_verifyChocoboFetched)
         {
             Stop(StopReason.ChocoboMaxed);
             return true;
@@ -508,8 +550,8 @@ public sealed unsafe class FarmingController
 
         _targetFateId = best.Value.Fate.FateId;
         _startedFateId = 0; // new fate -> allow the start-NPC talk again
-        _collectTurnedIn = 0;
-        _collectEstimatedNeeded = 0;
+        _fateNpcInteractedMs = 0; // clear the post-interact hold for the new fate
+        ResetPerFateState(); // clear escort/collect carry-over from any previous fate
         State = FarmState.TravelingToFate;
     }
 
@@ -546,7 +588,8 @@ public sealed unsafe class FarmingController
             if (C.AutoLevelSync) SyncToFate();
 
             Stats.OnFateAttempted();
-            IPCManager.StartCombat(C); // (re)engage now that we're grounded inside the fate
+            Features.ChocoboManager.SampleXpAtFateStart(); // for empirical XP-stall (rank-cap) detection
+            SetCombatBackend(true); // (re)engage now that we're grounded inside the fate
             State = FarmState.InFate;
             return;
         }
@@ -571,51 +614,85 @@ public sealed unsafe class FarmingController
 
     // Tracks the fate-start NPC interaction so we don't spam-interact while dialogue is up.
     private long _fateNpcInteractedMs;
+    // After firing a collect interact (NPC turn-in OR ground pickup) we latch a cooldown and the
+    // object id we interacted with. The game opens addons / starts cast animations on a SERVER
+    // ROUNDTRIP, so the addon isn't visible on the next tick — if we re-fire the interact in that
+    // gap we CANCEL the in-flight one (the Request window opens then instantly closes, forever).
+    // This is exactly the guard the reference executor uses (don't re-interact while a previous
+    // interact is still resolving). We hold off re-interacting the SAME object until this expires.
+    private long _collectInteractCooldownMs;
+    private ulong _collectInteractObjId;
+    private const long CollectInteractCooldownMs = 2000;
     private ushort _startedFateId; // fate we've already done the start-NPC talk for (don't repeat)
     private long _fateStartConfirmedMs; // when we clicked Yes to start a fate (escort follow waits ~3s after)
     private ulong _escortNpcId; // cached escort NPC object id (FateId can flicker to 0 mid-fate)
     private bool _escortChasing; // hysteresis: are we currently chasing the escort NPC?
+    // ESCORT detection by RING MOVEMENT: an escort fate's ring (fate.Position) MOVES as the escorted
+    // NPC walks; a normal fate's ring is fixed. We sample the position on first sight and flag the
+    // fate as a follow fate once the ring has drifted past a threshold. This is reliable where the
+    // sheet Rule and MotivationNpc are not (many non-escort fates expose a MotivationNpc).
+    private Vector3 _fateInitialPos; // first-seen ring center for the current fate
+    private bool _fatePosSampled;    // have we sampled _fateInitialPos yet?
+    private bool _ringMovedFollow;   // ring has moved enough -> treat as follow fate (latched)
+    private const float RingMoveFollowThreshold = 8f; // yalms of ring drift to call it an escort
     private long _dismountedForNpcMs; // when we dismounted to talk to a fate NPC (settle delay)
 
     /// <summary>
-    /// Some fates require talking to a start NPC (orange "!") to begin: it pops Talk dialogue we
-    /// click through, then a Yes/No to start. Returns true while we're handling that (caller should
-    /// return and let it finish). Reuses ECommons addon helpers (Talk.Click / SelectYesno.Yes).
+    /// Some fates require talking to a start NPC (orange "!") to begin: it pops Talk dialogue then a
+    /// Yes/No to start. TextAdvance (taken session-wide at Start) advances/confirms ALL of that for
+    /// us; we only have to do the interact. Returns true while we're handling it (caller should
+    /// return and let it finish). The manual Talk/Yes clicking below is a FALLBACK only for when
+    /// TextAdvance isn't installed.
     /// </summary>
     private unsafe bool TryStartFateViaNpc(IFate fate)
     {
-        // 1) If a Yes/No prompt is up, confirm it (this is the "Assist the guard?" start prompt).
-        //    Gate on IsAddonReady (NOT just IsVisible): during the open/close animation the addon
-        //    is visible but its YesButton pointer is still null, which NRE'd inside SelectYesno.Yes.
-        if (ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>(
-                "SelectYesno", out var yn) && ECommons.GenericHelpers.IsAddonReady(yn))
+        // 1) Dialogue handling. When TextAdvance holds control it advances the Talk window and
+        //    confirms the Yes/No start prompt itself — we just record the confirm time and wait.
+        var yesOpen = ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>(
+                "SelectYesno", out var yn) && ECommons.GenericHelpers.IsAddonReady(yn);
+        var talkOpen = ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>(
+                "Talk", out var talk) && ECommons.GenericHelpers.IsAddonReady(talk);
+
+        if (TextAdvanceIPC.ControlActive)
         {
-            if (EzThrottler.Throttle("AF_FateYes", 600))
+            if (yesOpen)
+                _fateStartConfirmedMs = Environment.TickCount64; // TA confirms it; fate activates ~3s later
+            if (yesOpen || talkOpen)
+                return true; // let TextAdvance drive the dialogue; just hold
+        }
+        else
+        {
+            // FALLBACK (no TextAdvance): drive the dialogue ourselves.
+            // Gate on IsAddonReady (NOT just IsVisible): during the open/close animation the addon
+            // is visible but its YesButton pointer is still null, which NRE'd inside SelectYesno.Yes.
+            if (yesOpen)
             {
-                try { new ECommons.UIHelpers.AddonMasterImplementations.AddonMaster.SelectYesno((nint)yn).Yes(); }
-                catch (Exception e) { Svc.Log.Verbose($"[Controller] FateYes failed (addon mid-transition): {e.Message}"); }
-                _fateStartConfirmedMs = Environment.TickCount64; // fate activates ~3s after this
+                if (EzThrottler.Throttle("AF_FateYes", 600))
+                {
+                    try { new ECommons.UIHelpers.AddonMasterImplementations.AddonMaster.SelectYesno((nint)yn).Yes(); }
+                    catch (Exception e) { Svc.Log.Verbose($"[Controller] FateYes failed (addon mid-transition): {e.Message}"); }
+                    _fateStartConfirmedMs = Environment.TickCount64; // fate activates ~3s after this
+                }
+                return true;
             }
-            return true;
+            if (talkOpen)
+            {
+                if (EzThrottler.Throttle("AF_FateTalk", 250))
+                {
+                    try { new ECommons.UIHelpers.AddonMasterImplementations.AddonMaster.Talk((nint)talk).Click(); }
+                    catch (Exception e) { Svc.Log.Verbose($"[Controller] FateTalk failed (addon mid-transition): {e.Message}"); }
+                }
+                return true;
+            }
         }
 
-        // 2) If Talk dialogue is up, click through it.
-        if (ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>(
-                "Talk", out var talk) && ECommons.GenericHelpers.IsAddonReady(talk))
-        {
-            if (EzThrottler.Throttle("AF_FateTalk", 250))
-            {
-                try { new ECommons.UIHelpers.AddonMasterImplementations.AddonMaster.Talk((nint)talk).Click(); }
-                catch (Exception e) { Svc.Log.Verbose($"[Controller] FateTalk failed (addon mid-transition): {e.Message}"); }
-            }
-            return true;
-        }
+        Diag("NPC", "dialogue", $"yesOpen={yesOpen} talkOpen={talkOpen} taControl={TextAdvanceIPC.ControlActive}");
 
         // 3) No dialogue open. Look for the fate-start NPC and interact with it. Pass the fate
         // radius so we can also match an un-started "!" NPC (FateId=0) standing in the ring.
         var npcRadius = fate.Radius > 0 ? fate.Radius : 0f;
         var npc = FateTargeting.FindFateStartNpc(_targetFateId, npcRadius);
-        if (npc == null) return false; // nothing to start -> normal combat fate
+        if (npc == null) { Diag("NPC", "find", $"no start NPC found (fateId={_targetFateId} radius={npcRadius:F1}) -> treating as combat fate"); return false; }
 
         // GROUNDED GUARD: land + dismount before targeting/interacting with the start NPC. We don't
         // want to dive at the quest giver from the air or fire Interact while mounted.
@@ -646,6 +723,7 @@ public sealed unsafe class FarmingController
         var me = Player.Object;
         if (me == null) return false;
         var dist = Vector3.Distance(me.Position, npc.Position);
+        Diag("NPC", "approach", $"npc='{npc.Name}' dist={dist:F1} occupied={ECommons.GenericHelpers.IsOccupied()} animLock={Player.IsAnimationLocked} interactable={Player.Interactable}");
         if (dist > 4f)
         {
             if (!ECommons.GenericHelpers.IsOccupied())
@@ -656,12 +734,13 @@ public sealed unsafe class FarmingController
 
         // In range: target + interact (throttled).
         Navigator.Stop();
-        if (Player.IsAnimationLocked || !Player.Interactable) return true;
+        if (Player.IsAnimationLocked || !Player.Interactable) { Diag("NPC", "interact", $"in range but blocked (animLock={Player.IsAnimationLocked} interactable={Player.Interactable})"); return true; }
         if (Svc.Targets.Target?.GameObjectId != npc.GameObjectId)
             Svc.Targets.Target = npc;
         if (EzThrottler.Throttle("AF_FateInteract", 1500))
         {
             StatusText = $"Starting fate via NPC: {npc.Name}";
+            Diag("NPC", "interact", $"FIRING InteractWithObject on '{npc.Name}' (id={npc.GameObjectId})");
             FFXIVClientStructs.FFXIV.Client.Game.Control.TargetSystem.Instance()
                 ->InteractWithObject(((FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)npc.Address), false);
             _fateNpcInteractedMs = Environment.TickCount64;
@@ -746,29 +825,56 @@ public sealed unsafe class FarmingController
             if ((canStart || dialogueOpen) && TryStartFateViaNpc(fate)) return;
         }
 
+        // POST-INTERACT HOLD: after we've fired the interact on the start NPC, the Talk addon takes
+        // a few ticks to actually appear. During that window `dialogueOpen` is still false and the
+        // start latch is already set, so without this guard we'd fall through to Navigator.MoveTo
+        // below — and MOVING cancels the pending interaction ("event canceled", dialogue flickers
+        // open then vanishes). So: once we've interacted, STAND STILL until the dialogue opens or
+        // the fate actually starts (or a timeout), letting TryStartFateViaNpc drive it next tick.
+        if (_fateNpcInteractedMs != 0
+            && _startedFateId == _targetFateId
+            && fate.Progress <= 0
+            && fate.State != FateState.Running
+            && Environment.TickCount64 - _fateNpcInteractedMs < 5000)
+        {
+            Navigator.Stop();
+            StatusText = $"Starting fate: {fate.Name} (waiting for dialogue)";
+            return;
+        }
+
         // Keep ourselves inside the fate ring if we've drifted out. Don't do this when the combat
         // backend (BMR AI) is driving movement, and never re-mount for these short hops.
         if (!BmrMovementActive() && !IsInsideFate(fate) && !ECommons.GenericHelpers.IsOccupied())
             Navigator.MoveTo(C, fate.Position, Math.Max(2f, fate.Radius * 0.6f), allowMount: false);
 
-        // BEHAVIORAL escort detection: classification (Rule/icon) is unreliable and often tags
-        // escort fates as Battle (e.g. "The Ceruleum Road"). The unambiguous signal is a friendly
-        // NPC carrying our fate id — that's the escorted NPC. If one exists (or we've cached it),
-        // ALWAYS run the escort follow handler regardless of how Classify tagged the fate.
-        var hasEscortNpc = type == FateType.Escort
-                           || _escortNpcId != 0
-                           || FateTargeting.GetDefendedFriendlies(_targetFateId).Count > 0;
+        // ESCORT DETECTION by RING MOVEMENT. An escort/follow fate's ring center (fate.Position)
+        // MOVES as the escorted NPC walks its route; a normal fate's ring is fixed. The sheet Rule
+        // is unreliable ("The Ceruleum Road" is a follow fate but classifies as Battle/Rule=3), and
+        // MotivationNpc is NOT a follow signal (many non-escort fates expose one — e.g. the
+        // Twin-tongued Addison fate). So we detect by watching the ring drift:
+        //   - sample the ring center the first time we see this fate;
+        //   - once it has moved past RingMoveFollowThreshold, latch this fate as a follow fate.
+        // A fate explicitly classified Escort is always a follow fate immediately.
+        if (!_fatePosSampled)
+        {
+            _fateInitialPos = fate.Position;
+            _fatePosSampled = true;
+        }
+        else if (!_ringMovedFollow && Vector3.Distance(_fateInitialPos, fate.Position) >= RingMoveFollowThreshold)
+        {
+            _ringMovedFollow = true;
+            Diag("Escort", "ringmove", $"ring moved {Vector3.Distance(_fateInitialPos, fate.Position):F1}y -> follow fate {_targetFateId}");
+        }
+
+        var isFollowFate = type == FateType.Escort || _ringMovedFollow;
 
         switch (type)
         {
             case FateType.Collect:
                 HandleCollectFate(fate);
                 break;
-            case FateType.Escort:
-                HandleEscortFate(fate);
-                break;
             default:
-                if (hasEscortNpc) { HandleEscortFate(fate); break; }
+                if (isFollowFate) { HandleEscortFate(fate); break; }
                 // Battle / Boss / Defend: combat backend does the work. We just make sure we have a target.
                 EnsureCombatEngaged(fate);
                 break;
@@ -778,6 +884,13 @@ public sealed unsafe class FarmingController
         if (fate.Progress >= 100)
             OnFateFinished();
     }
+
+    // The fate enemy we've committed to killing. STICKY: we keep this target until it dies or
+    // becomes invalid (this is the single-source-of-truth that the reference AutoTarget uses — its
+    // default retarget rule is "only switch if you have no target / are targeting an ally"). The old
+    // code re-picked the target in three different places with three different rules every tick,
+    // which is exactly why it flickered between targets and sometimes stood still pointing at one.
+    private ulong _engagedTargetId;
 
     private void EnsureCombatEngaged(IFate fate)
     {
@@ -789,305 +902,358 @@ public sealed unsafe class FarmingController
         // and dismount FIRST, then bail this tick — we re-evaluate targeting once we're on foot.
         if (Features.MountManager.IsMounted || Features.MountManager.IsFlying)
         {
+            Diag("Combat", "grounded", $"mounted/flying -> dismounting before engage (mounted={Features.MountManager.IsMounted} flying={Features.MountManager.IsFlying})");
             Navigator.Stop();
             Features.MountManager.Dismount();
             StatusText = $"Landing/dismounting before engaging: {fate.Name}";
             return;
         }
 
-        // APPROACH FIRST: the very first thing we do is close distance to the nearest fate enemy.
-        // If we're dropped far from the mob (or it isn't aggroed), we must NOT set it as the target
-        // yet — doing so makes the rotation start plinking with a ranged auto/skill from across the
-        // fate, and that cast trips IsOccupied() which blocks our movement, leaving us standing
-        // still. So while we're out of engage range we keep NO target and just navigate in.
-        {
-            var nearest = FateTargeting.GetNearestFateEnemy(_targetFateId);
-            if (nearest != null)
-            {
-                var nd = Vector3.Distance(me.Position, nearest.Position);
-                var ne = Math.Max(2.5f, nearest.HitboxRadius + 2.5f);
-                if (nd > ne)
-                {
-                    // Respect BMR's AOE dodge while approaching.
-                    if (BmrMovementActive())
-                    {
-                        if (IPCManager.YieldMovementForDodge() || IPCManager.DangerPresent())
-                        {
-                            _yieldUntilMs = Environment.TickCount64 + YieldSettleMs;
-                            Navigator.Stop();
-                            return;
-                        }
-                        IPCManager.SetBmrMovement(false); // take movement so vnav can close in
-                    }
-                    // Clear any target so the rotation doesn't cast from range (which would root us).
-                    if (Svc.Targets.Target != null) Svc.Targets.Target = null;
-                    if (!ECommons.GenericHelpers.IsOccupied())
-                        Navigator.MoveTo(C, nearest.Position, ne, allowMount: false);
-                    StatusText = $"Approaching {nearest.Name}";
-                    return;
-                }
-            }
-        }
-
-        // STICKY TARGET (every 1s): keep us on an ENEMY, never a friendly.
-        //  - If we're already targeting a live ENEMY  -> leave it alone (don't yank mid-cast).
-        //  - Otherwise (friendly / dead / nothing)     -> switch to a fate enemy.
-        // We only do this while synced to the fate (i.e. actually fighting it). A friendly under
-        // attack is handled implicitly: switching to an enemy and killing it peels the threat.
-        if (EzThrottler.Throttle("AF_Sticky", 1000))
-        {
-            var cur = Svc.Targets.Target as IBattleNpc;
-            var onLiveEnemy = cur != null && FateTargeting.IsAttackableEnemy(cur);
-            if (!onLiveEnemy)
-            {
-                // Prefer an enemy attacking a friendly (peel), else the nearest fate enemy.
-                var threat = FateTargeting.GetActiveDefendThreat(_targetFateId);
-                var pick = threat ?? FateTargeting.GetNearestFateEnemy(_targetFateId);
-                if (pick != null)
-                {
-                    Svc.Targets.Target = pick;
-                    Svc.Log.Debug($"[Combat] Sticky retarget -> '{pick.Name}'.");
-                }
-            }
-        }
-
-        // CRITICAL: every backend (including BMR AI) needs a TARGET to fight — none of them will
-        // go hunt fate mobs on their own. We pick the nearest live mob belonging to THIS fate
-        // (matched by GameObject.FateId) and feed it to the combat backend.
-        if (!EzThrottler.Throttle("AF_AcquireTarget", 300)) return;
-
-        // SMART MIX (BMR movement backend): vnavmesh walks us to the enemy, BMR handles AOE
-        // avoidance. To stop vnav and BMR fighting for control (walk out of AOE -> walk back in ->
-        // walk out again), we use a latch with hysteresis:
-        //   - Enter yield as soon as a dodge is imminent (ShouldYieldForDodge).
-        //   - STAY yielded while ANY danger is present (DangerPresent), and for a short settle
-        //     window after danger fully clears, before vnav is allowed to resume pathing.
-        if (BmrMovementActive())
+        // BMR AOE-DODGE YIELD — ONLY while actually IN COMBAT. This latch hands movement to BMR so
+        // vnav and BMR don't fight while dodging. But it must NEVER block us from APPROACHING mobs:
+        // a forbidden zone (e.g. a fire on the ground) sets DangerPresent()=true even when we're far
+        // away and out of combat, and gating on it there froze us in place staring at distant mobs
+        // (the recurring "stuck not navigating" bug). So we only yield once we're engaged.
+        if (BmrMovementActive() && InCombat())
         {
             var now = Environment.TickCount64;
-            if (IPCManager.YieldMovementForDodge())
+            if (IPCManager.YieldMovementForDodge() || IPCManager.DangerPresent())
             {
-                // Imminent danger — hand movement to BMR and (re)arm the settle timer.
-                _yieldUntilMs = now + YieldSettleMs;
-                Navigator.Stop();
-                return;
-            }
-            if (IPCManager.DangerPresent())
-            {
-                // Danger still active (zone hasn't expired) — keep yielding, keep timer armed.
+                Diag("Combat", "yield", $"yielding movement to BMR (dodge={IPCManager.YieldMovementForDodge()} danger={IPCManager.DangerPresent()})");
                 _yieldUntilMs = now + YieldSettleMs;
                 Navigator.Stop();
                 return;
             }
             if (now < _yieldUntilMs)
             {
-                // Danger just cleared; wait out the settle window so we don't immediately path
-                // back into a zone that BMR only just pulled us out of.
+                Diag("Combat", "yield", $"in post-dodge settle window ({_yieldUntilMs - now}ms left)");
                 Navigator.Stop();
                 return;
             }
         }
 
-        var isDefend = FateSelector.Classify(fate) == FateType.Defend;
-        var target = FateTargeting.EnsureFateTarget(_targetFateId, defendPriority: isDefend);
+        // ---- SINGLE TARGET SELECTION (sticky) --------------------------------------------------
+        // Exactly ONE place picks the combat target, and it is sticky: keep the current engaged
+        // target while it's still a live enemy in OUR fate. Only re-pick when it's gone/invalid.
+        //
+        var combatTarget = SelectCombatTarget(fate);
 
-        if (target != null && EzThrottler.Throttle("AF_TargetLog", 3000))
-            Svc.Log.Debug($"[Combat] Targeting fate mob '{target.Name}' ({FateTargeting.CountFateEnemies(_targetFateId)} fate mobs nearby).");
+        Diag("Combat", "select", $"selected={(combatTarget?.Name.ToString() ?? "<null>")} engagedId={_engagedTargetId} fateEnemies={FateTargeting.CountFateEnemies(_targetFateId)} fateId={_targetFateId} curTarget={(Svc.Targets.Target?.Name.ToString() ?? "<null>")}");
 
-        // WHEN BMR OWNS MOVEMENT: let BMR do everything — it paths to the target AND dodges AOEs.
-        // We only pick the target (for mass-pull, the nearest un-aggroed mob to widen the pull) and
-        // otherwise stay completely out of movement. We must NOT forbid BMR movement or issue vnav
-        // here, or BMR can't dodge (that was the "not dodging AOEs at all" regression). Make sure
-        // movement is handed back in case a previous non-BMR path left it forbidden.
-        if (BmrMovementActive())
+        if (combatTarget == null)
         {
-            if (target == null) return; // BMR will reposition; nothing to target yet
-
-            // MASS PULL (no range limit): while under the pile cap and there's an un-aggroed fate
-            // enemy, target the nearest one to widen the pull. Once capped, keep the chosen target.
-            if (C.MassPull)
-            {
-                var aggroed = FateTargeting.CountAggroedFateEnemies(_targetFateId);
-                if (aggroed < C.MassPullMaxPile)
-                {
-                    var pull = FateTargeting.GetNearestUnaggroedFateEnemy(_targetFateId);
-                    if (pull != null) target = pull;
-                }
-            }
-
-            if (Player.Object is not { IsCasting: true }
-                && (Svc.Targets.Target is not IBattleNpc bc || bc.GameObjectId != target.GameObjectId))
-                Svc.Targets.Target = target;
-
-            // BMR won't CHASE a fate enemy that isn't aggroed onto us yet — it only dodges and
-            // fights what's already engaged. So when the target is out of engage range, WE vnav
-            // toward it (taking movement from BMR); once in range we hand movement back to BMR so it
-            // can resume AOE dodging. This is the "navigate to the closest enemy at any range" fix.
-            var bmrDist = Vector3.Distance(me.Position, target.Position);
-            var bmrEngage = Math.Max(2.5f, target.HitboxRadius + 2.5f);
-            if (bmrDist > bmrEngage && !ECommons.GenericHelpers.IsOccupied())
-            {
-                IPCManager.SetBmrMovement(false);      // take movement so vnav can path to the mob
-                Navigator.MoveTo(C, target.Position, bmrEngage, allowMount: false);
-            }
-            else
-            {
-                IPCManager.SetBmrMovement(true);       // in range -> hand back so BMR dodges/fights
-                FateTargeting.StartAutoAttack(target); // open combat so the backend engages
-            }
-            return;
-        }
-
-        if (target == null)
-        {
-            // No fate mobs nearby. Move toward the fate center to find action.
-            if (!ECommons.GenericHelpers.IsOccupied()
-                && Vector3.Distance(me.Position, fate.Position) > fate.Radius * 0.4f)
-            {
+            // No fate mobs right now. Drift toward the fate centre to find action (unless BMR drives
+            // movement, in which case it'll reposition us itself).
+            _engagedTargetId = 0;
+            Diag("Combat", "notarget", $"no fate enemy; driftToCenter={(!BmrMovementActive() && Vector3.Distance(me.Position, fate.Position) > fate.Radius * 0.4f)} distToCenter={Vector3.Distance(me.Position, fate.Position):F1} radius={fate.Radius:F1}");
+            if (!BmrMovementActive() && Vector3.Distance(me.Position, fate.Position) > fate.Radius * 0.4f)
                 Navigator.MoveTo(C, fate.Position, Math.Max(2f, fate.Radius * 0.4f), allowMount: false);
-            }
+            StatusText = $"In fate: {fate.Name} (waiting for mobs)";
             return;
         }
 
-        // --- Below here BMR does NOT own movement (we returned above if it did). We drive movement
-        // ourselves via vnav. ---
+        // Commit the target ONCE (only write Svc.Targets.Target when it actually changes — redundant
+        // writes every tick are part of what made the game UI flicker).
+        _engagedTargetId = combatTarget.GameObjectId;
+        if (Svc.Targets.Target is not IBattleNpc cur || cur.GameObjectId != combatTarget.GameObjectId)
+            Svc.Targets.Target = combatTarget;
 
-        // MASS PULL (no range limit): while under the pile cap and there's an un-aggroed fate enemy,
-        // walk to the nearest one to body-pull it; once capped, fall through to engage the target.
+        // ---- MOVE TARGET (may differ from combat target for mass-pull body-pulling) ------------
+        // The thing we WALK to. Normally the combat target. For mass pull, while under the pile cap,
+        // we walk to the nearest un-aggroed fate mob to body-pull it — WITHOUT changing the combat
+        // target (so the rotation keeps killing one mob while we gather more). Decoupling these is
+        // what lets us "pull n, aoe, repeat" without the target thrashing.
+        var moveTarget = combatTarget;
         if (C.MassPull)
         {
             var aggroed = FateTargeting.CountAggroedFateEnemies(_targetFateId);
             if (aggroed < C.MassPullMaxPile)
             {
                 var pull = FateTargeting.GetNearestUnaggroedFateEnemy(_targetFateId);
-                if (pull != null) target = pull;
+                if (pull != null) moveTarget = pull;
             }
         }
 
-        // Walk into melee/casting range of the target so the rotation backend (Wrath/RSR) can attack.
-        var dist = Vector3.Distance(me.Position, target.Position);
-        var engageRange = Math.Max(2.5f, target.HitboxRadius + 2.5f);
-        if (dist > engageRange && !ECommons.GenericHelpers.IsOccupied())
+        // ---- MOVEMENT --------------------------------------------------------------------------
+        // ALWAYS path to the move target when out of range — fate enemies must be reached at ANY
+        // distance. No IsOccupied / throttle gates here (those caused the "targets a mob but won't
+        // walk to it" stall).
+        var dist = Vector3.Distance(me.Position, moveTarget.Position);
+        var engageRange = Math.Max(2.5f, moveTarget.HitboxRadius + 2.5f);
+
+        Diag("Combat", "move", $"target='{combatTarget.Name}' move='{moveTarget.Name}' dist={dist:F1} engageRange={engageRange:F1} outOfRange={dist > engageRange} bmrMove={BmrMovementActive()} inCombat={InCombat()} navRunning={Autofate.IPC.NavmeshIPC.IsRunning()} navPathing={Autofate.IPC.NavmeshIPC.PathfindInProgress()} meshReady={Autofate.IPC.NavmeshIPC.MeshReady()} myPos={me.Position} targetPos={moveTarget.Position}");
+
+        if (dist > engageRange)
         {
-            Navigator.MoveTo(C, target.Position, engageRange, allowMount: false);
+            // OUT OF RANGE.
+            if (BmrMovementActive())
+            {
+                // CRITICAL (AOE-dodge fix): only steal movement from BMR to APPROACH while we're NOT
+                // already in combat. BMR won't chase an un-aggroed mob, so we vnav in to start the
+                // pull — but the moment we're in combat, BMR both chases the aggroed target AND
+                // dodges AOEs. If we keep yanking movement back based on distance, the instant BMR
+                // steps us out of an AOE we'd be "out of range" and vnav would drag us right back in,
+                // looping us back and forth at engage range instead of dodging. So once in combat we
+                // hand movement fully to BMR and do NOT path ourselves.
+                if (InCombat())
+                {
+                    IPCManager.SetBmrMovement(true);  // BMR owns approach + dodge while fighting
+                    Navigator.Stop();
+                    StatusText = $"Fighting {combatTarget.Name} (BMR repositioning)";
+                }
+                else
+                {
+                    IPCManager.SetBmrMovement(false); // not in combat yet -> vnav closes in to pull
+                    Navigator.MoveTo(C, moveTarget.Position, engageRange, allowMount: false);
+                    StatusText = $"Engaging {combatTarget.Name} (moving to {moveTarget.Name})";
+                }
+            }
+            else
+            {
+                Navigator.MoveTo(C, moveTarget.Position, engageRange, allowMount: false);
+                StatusText = $"Engaging {combatTarget.Name} (moving to {moveTarget.Name})";
+            }
         }
         else
         {
-            Navigator.Stop();
-            // In range: force-open combat ourselves (auto-attack) so the backend engages even if it
-            // would otherwise wait to be hit / has no working lease.
-            FateTargeting.StartAutoAttack(target);
+            if (BmrMovementActive())
+                IPCManager.SetBmrMovement(true); // in range -> hand movement back so BMR dodges/fights
+            else
+                Navigator.Stop();
+            // Open combat ourselves so the backend engages even if it's waiting to be hit.
+            FateTargeting.StartAutoAttack(combatTarget);
+            StatusText = $"Fighting {combatTarget.Name}";
         }
+    }
+
+    /// <summary>
+    /// Pick the fate combat target, STICKILY (mirrors the reference AutoTarget retarget rule). Order:
+    ///   1) Keep the currently engaged target if it's still a live enemy in OUR fate.
+    ///   2) Otherwise, for Defend/Escort fates, prefer the enemy attacking a protected friendly.
+    ///   3) Otherwise the nearest fate enemy.
+    /// Returns null when our fate has no live enemies. This single selector replaces the three
+    /// conflicting ones the old code ran each tick.
+    /// </summary>
+    private IBattleNpc? SelectCombatTarget(IFate fate)
+    {
+        // 1) STICKY: keep the engaged target while it's valid (alive + in our fate). This is the
+        //    anti-flicker rule — we do NOT yank to a closer mob just because one wandered nearer.
+        if (_engagedTargetId != 0
+            && Svc.Objects.SearchById(_engagedTargetId) is IBattleNpc engaged
+            && FateTargeting.IsFateEnemy(engaged, _targetFateId))
+        {
+            return engaged;
+        }
+
+        // 2) Defend/Escort peel: the enemy actively attacking a protected friendly takes priority
+        //    when we don't already have a valid target.
+        var type = FateSelector.Classify(fate);
+        if (type == FateType.Defend || type == FateType.Escort)
+        {
+            var threat = FateTargeting.GetActiveDefendThreat(_targetFateId);
+            if (threat != null) return threat;
+        }
+
+        // 3) Nearest fate enemy.
+        return FateTargeting.GetNearestFateEnemy(_targetFateId);
     }
 
     private bool BmrMovementActive() => IPCManager.BmrHandlesMovement(C);
 
     // ---------------------------------------------------------------- collect fates
-    // TODO(WIP): Collect fates are disabled in the UI — the turn-in loop needs in-game calibration.
-    // Grab labeled ground items (EventObj with the FateId), turn them in to the "!" NPC, and infer
-    // how many remain from the progress delta. We don't need to "complete" the fate, just hit 100%
-    // (or run dry) then leave.
+    // Collect fates: grab labeled ground items (EventObj carrying the FateId), hand them in to the
+    // game-designated objective NPC in fixed batches, and leave once the fate hits 100% (or runs dry
+    // of items with progress still incomplete). We don't try to LEARN a per-item progress value
+    // (that was the old, never-calibrated WIP path); instead we mirror DWD/BMR: hold until we have a
+    // full batch, hand in, repeat — with a final partial hand-in when no more items remain.
+    // Collect-fate goal, computed fresh each tick (mirrors DWD's FateUtils.GetGoal). EXACTLY ONE of
+    // these drives the tick — that single-owner model is what stops the target tug-of-war that made
+    // us flicker between the NPC and an enemy.
+    private enum CollectGoal { None, HandIn, Pickup, Fight }
+
+    private CollectGoal GetCollectGoal(IFate fate, uint collectItemId, int have)
+    {
+        // Nothing to do once the fate is done.
+        if (fate.Progress >= 100) return CollectGoal.None;
+        if (collectItemId == 0) return CollectGoal.None;
+
+        // HAND IN once we hold a full batch (DWD: inventory >= 10). Also hand in a partial batch when
+        // there are no more ground items to collect, so we don't sit on items forever.
+        var moreItemsOnGround = FateTargeting.GetNearestCollectable(_targetFateId) != null;
+        if (have >= CollectBatchSize || (have > 0 && !moreItemsOnGround))
+            return CollectGoal.HandIn;
+
+        // FIGHT only if something is actually beating on us — clear it before gathering (DWD picks up
+        // only while NOT in combat). We do NOT proactively hunt mobs in a collect fate.
+        if (InCombat() && FateTargeting.GetEnemiesAttackingMe().Count > 0)
+            return CollectGoal.Fight;
+
+        // PICK UP the nearest ground collectable (only while out of combat, like DWD).
+        if (!InCombat() && moreItemsOnGround)
+            return CollectGoal.Pickup;
+
+        return CollectGoal.None;
+    }
+
     private unsafe void HandleCollectFate(IFate fate)
     {
         var collectItemId = FateSelector.GetCollectItemId(fate);
         var have = collectItemId != 0 ? InventoryUtil.GetItemCount(collectItemId) : 0;
 
-        // --- 1) If the Item Request (turn-in) window is open, drive the hand-in. ---
+        // TURN-IN DELEGATION (the reference plugins' approach): TextAdvance handles the ENTIRE
+        // Request-window flow (fills the slot + clicks Hand Over + skips the Talk dialogue). Our old
+        // manual AgentInventoryContext.OpenForItemSlot poke is what made the inventory "pull up then
+        // instantly close" — the game discards that synthetic context menu. We just open the turn-in
+        // dialogue and let TextAdvance complete it.
+        //
+        // RE-ASSERT control here every tick (self-healing). TextAdvance can silently drop external
+        // control (zone change / its own timeout / reload), and if it has, the Request window sits
+        // unfilled forever — the "stuck at turn-in until I restart the plugin" bug. Enable() reconciles
+        // against TextAdvance's ACTUAL state and re-issues the request when it isn't in control.
+        TextAdvanceIPC.Enable();
+
+        // If the Request window is open, TextAdvance is handling it — keep the combat backend OFF so
+        // nothing competes, and just wait for it to finish.
         if (ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>(
                 "Request", out var req) && req != null && req->IsVisible)
         {
-            HandleRequestWindow((nint)req, fate, collectItemId);
-            return;
-        }
-
-        // --- 2) Decide whether to turn in now. ---
-        // Turn in once we have a batch (initial sample = CollectInitialTurnIn) OR once we hold the
-        // estimated remaining amount. Until we've learned the per-item value, use the initial batch.
-        var batch = _collectEstimatedNeeded > 0
-            ? Math.Min(have, _collectEstimatedNeeded - _collectTurnedIn)
-            : C.CollectInitialTurnIn;
-
-        var fateProgress = fate.Progress;
-        var done = fateProgress >= 100;
-        if (done)
-        {
-            // Threshold hit — leave for the next fate (collect fates don't need completing).
-            OnFateFinished();
-            return;
-        }
-
-        if (collectItemId != 0 && have > 0 && have >= Math.Min(batch, C.CollectInitialTurnIn))
-        {
-            // Walk to the turn-in NPC and interact to open the Request window.
-            var npc = FateTargeting.GetCollectTurnInNpc(_targetFateId);
-            if (npc != null)
+            SetCombatBackend(false);
+            Diag("Collect", "request", $"Request window open: taInstalled={TextAdvanceIPC.IsInstalled} taControl={TextAdvanceIPC.IsInExternalControl()} item={collectItemId} have={have}");
+            // Only trust TextAdvance to drive it if it's ACTUALLY in external control right now. If
+            // it isn't (not installed, or dropped control and somehow didn't re-take), fall back to
+            // driving the Request window ourselves so we never get stuck with the slot unfilled.
+            if (TextAdvanceIPC.IsInstalled && TextAdvanceIPC.IsInExternalControl())
             {
-                var me2 = Player.Object;
-                if (me2 != null && Vector3.Distance(me2.Position, npc.Position) > 4f)
-                {
-                    if (!ECommons.GenericHelpers.IsOccupied())
-                        Navigator.MoveTo(C, npc.Position, 3f, allowMount: false);
-                    StatusText = $"Collect: turning in (to {npc.Name})";
-                    return;
-                }
-                Navigator.Stop();
-                if (Player.IsAnimationLocked || !Player.Interactable) return;
-                if (Svc.Targets.Target?.GameObjectId != npc.GameObjectId)
-                    Svc.Targets.Target = npc;
-                if (EzThrottler.Throttle("AF_CollectInteract", 1500))
-                {
-                    _collectProgressBeforeTurnIn = fateProgress; // sample to learn per-item value
-                    FFXIVClientStructs.FFXIV.Client.Game.Control.TargetSystem.Instance()
-                        ->InteractWithObject(((FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)npc.Address), false);
-                }
+                StatusText = "Collect: handing in (TextAdvance)";
                 return;
             }
-        }
-
-        // --- 3) Otherwise gather: go pick up the nearest ground collectable. ---
-        // COMBAT FIRST: if we're in combat (mobs aggroed on us), finish the fight before collecting.
-        // Picking up items mid-combat gets us beaten on and interrupts pickups. Engage the attacker
-        // and bail this tick; we'll resume collecting once combat is clear.
-        if (InCombat() && FateTargeting.GetEnemiesAttackingMe().Count > 0)
-        {
-            EnsureCombatEngaged(fate);
-            StatusText = $"Collect: clearing combat before gathering";
+            HandleRequestWindow((nint)req, fate, collectItemId); // fallback: fill + hand over ourselves
             return;
         }
 
+        var goal = GetCollectGoal(fate, collectItemId, have);
+        Diag("Collect", "goal", $"goal={goal} item={collectItemId} have={have} progress={fate.Progress} groundItems={(FateTargeting.GetNearestCollectable(_targetFateId) != null)} inCombat={InCombat()}");
+
+        // SINGLE-OWNER RULE: for every goal EXCEPT Fight, the rotation backend must be OFF. If it's
+        // running it will re-target an enemy every frame and fight us for Svc.Targets.Target — that
+        // is the "flicks between the NPC and an enemy without doing anything" bug. We only turn the
+        // backend on for the Fight goal (something is actively attacking us).
+        SetCombatBackend(goal == CollectGoal.Fight);
+
+        switch (goal)
+        {
+            case CollectGoal.HandIn:
+                CollectHandIn(fate, have);
+                return;
+
+            case CollectGoal.Fight:
+                // Something is attacking us — let the combat path clear it, then we resume next tick.
+                EnsureCombatEngaged(fate);
+                StatusText = "Collect: clearing combat before gathering";
+                return;
+
+            case CollectGoal.Pickup:
+                CollectPickup(have);
+                return;
+
+            default: // None
+                // Fate done, or waiting for items to respawn / combat to clear. Don't touch the
+                // target (no flicker); just idle near the centre so we're positioned for the next item.
+                if (fate.Progress >= 100) { OnFateFinished(); return; }
+                StatusText = $"Collect fate: {fate.Name} {fate.Progress}% (have {have})";
+                if (!BmrMovementActive())
+                    Navigator.MoveTo(C, fate.Position, Math.Max(2f, fate.Radius * 0.5f), allowMount: false);
+                return;
+        }
+    }
+
+    /// <summary>Walk to the objective NPC and interact to open the turn-in window. Combat backend is
+    /// already OFF (caller guarantees), so nothing competes for the target.</summary>
+    private unsafe void CollectHandIn(IFate fate, int have)
+    {
+        var npc = FateTargeting.GetCollectTurnInNpc(_targetFateId);
+        if (npc == null)
+        {
+            StatusText = "Collect: looking for turn-in NPC";
+            return;
+        }
+
+        var me = Player.Object;
+        if (me == null) return;
+
+        if (Vector3.Distance(me.Position, npc.Position) > 4f)
+        {
+            Navigator.MoveTo(C, npc.Position, 3f, allowMount: false);
+            StatusText = $"Collect: turning in {have} (to {npc.Name})";
+            return;
+        }
+
+        // Set the NPC target ONCE and keep it (backend is off, so it stays put — no flicker).
+        if (Svc.Targets.Target?.GameObjectId != npc.GameObjectId)
+            Svc.Targets.Target = npc;
+        TryCollectInteract(npc, $"Collect: interacting with {npc.Name}");
+    }
+
+    /// <summary>Walk to the nearest ground collectable and interact to pick it up. Combat backend is
+    /// already OFF (caller guarantees), so nothing competes for the target.</summary>
+    private unsafe void CollectPickup(int have)
+    {
         var item = FateTargeting.GetNearestCollectable(_targetFateId);
-        if (item != null)
+        if (item == null) return;
+
+        var me = Player.Object;
+        if (me == null) return;
+
+        if (Vector3.Distance(me.Position, item.Position) > 3f)
         {
-            var me = Player.Object;
-            if (me != null && Vector3.Distance(me.Position, item.Position) > 3f)
-            {
-                if (!ECommons.GenericHelpers.IsOccupied())
-                    Navigator.MoveTo(C, item.Position, 2f, allowMount: false);
-                StatusText = $"Collect: grabbing {item.Name} (have {have})";
-                return;
-            }
-            Navigator.Stop();
-            if (Player.IsAnimationLocked || !Player.Interactable) return;
-            if (Svc.Targets.Target?.GameObjectId != item.GameObjectId)
-                Svc.Targets.Target = item;
-            if (EzThrottler.Throttle("AF_CollectPickup", 1200))
-                FFXIVClientStructs.FFXIV.Client.Game.Control.TargetSystem.Instance()
-                    ->InteractWithObject(((FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)item.Address), false);
+            Navigator.MoveTo(C, item.Position, 2f, allowMount: false);
+            StatusText = $"Collect: grabbing {item.Name} (have {have})";
             return;
         }
 
-        // No ground items right now: kill mobs only if they aggro (handled by ClearingAggro guard),
-        // else hold near center and wait for collectables to respawn.
-        StatusText = $"Collect fate: {fate.Name} {fateProgress}% (have {have}, item {collectItemId})";
-        if (!BmrMovementActive() && !ECommons.GenericHelpers.IsOccupied())
-            Navigator.MoveTo(C, fate.Position, Math.Max(2f, fate.Radius * 0.5f), allowMount: false);
+        if (Svc.Targets.Target?.GameObjectId != item.GameObjectId)
+            Svc.Targets.Target = item;
+        TryCollectInteract(item, $"Collect: grabbing {item.Name} (have {have})");
     }
 
     /// <summary>
-    /// Drive the Item Request (collect turn-in) window: fill the slot with the collect item and
-    /// click Hand Over. Per the user's flow: right-click the request slot, select the item to fill,
-    /// then Hand Over. We use ECommons' Request master for Hand Over + AgentInventoryContext to fill.
-    /// Also learns how much fate-progress each turn-in grants to estimate the remaining count.
+    /// Fire a collect interact (NPC turn-in or ground pickup) the way the reference executor does:
+    ///   - STOP moving first (interacting while still pathing cancels the in-flight interact);
+    ///   - only when NOT animation-locked and interactable;
+    ///   - and ONLY ONCE per object until a cooldown expires, because the addon/cast it triggers
+    ///     opens on a server roundtrip and isn't visible next tick. Re-firing in that gap is what
+    ///     cancelled the opening Request window and made it open/close in an infinite loop.
+    /// </summary>
+    private unsafe void TryCollectInteract(IGameObject obj, string status)
+    {
+        Navigator.Stop(); // critical: never interact while still moving toward the target
+        if (Player.IsAnimationLocked || !Player.Interactable)
+        {
+            Diag("Collect", "interact", $"blocked (animLock={Player.IsAnimationLocked} interactable={Player.Interactable}) obj='{obj.Name}'");
+            return;
+        }
+
+        var now = Environment.TickCount64;
+        // Still within the cooldown for THIS object -> the previous interact is resolving; wait.
+        if (_collectInteractObjId == obj.GameObjectId && now < _collectInteractCooldownMs)
+        {
+            Diag("Collect", "interact", $"cooldown ({_collectInteractCooldownMs - now}ms left) obj='{obj.Name}'");
+            StatusText = status + " (waiting)";
+            return;
+        }
+
+        Diag("Collect", "interact", $"FIRING InteractWithObject on '{obj.Name}' (id={obj.GameObjectId})");
+        FFXIVClientStructs.FFXIV.Client.Game.Control.TargetSystem.Instance()
+            ->InteractWithObject(((FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)obj.Address), false);
+        _collectInteractObjId = obj.GameObjectId;
+        _collectInteractCooldownMs = now + CollectInteractCooldownMs;
+        StatusText = status;
+    }
+
+    /// <summary>
+    /// Drive the Item Request (collect turn-in) window: fill the slot with the collect item, then
+    /// click Hand Over. We use ECommons' Request master for Hand Over + AgentInventoryContext to
+    /// fill the slot (right-click the inventory item against the open Request addon).
     /// </summary>
     private unsafe void HandleRequestWindow(nint reqAddon, IFate fate, uint collectItemId)
     {
@@ -1110,8 +1276,6 @@ public sealed unsafe class FarmingController
             {
                 try { rq.HandOver(); }
                 catch (Exception e) { Svc.Log.Verbose($"[Collect] HandOver failed: {e.Message}"); return; }
-                // Learn per-item progress from the delta after the hand-in lands (next ticks).
-                _collectTurnedIn += Math.Max(1, C.CollectInitialTurnIn);
             }
             return;
         }
@@ -1139,14 +1303,35 @@ public sealed unsafe class FarmingController
         // NPC/center (it walks away otherwise) while letting the rotation kill threats.
         StatusText = $"Escort fate: {fate.Name} {fate.Progress}%";
 
-        // Target only our-fate enemies so the rotation engages threats. FateId-filtered, so we never
-        // pick an overlapping fate's mobs.
+        // CROSS-FATE TARGET LOCK. This is the fix for "we start attacking another fate's mobs when
+        // the escort walks through it." Two compounding causes:
+        //   1) Our own target pick is FateId-scoped (good), but the rotation backend (Wrath/RSR/BMR)
+        //      re-targets on its OWN, and a pass-through fate's nearby mobs are valid hostiles to it.
+        //   2) A pass-through fate's mob can land a hit on us, pulling us into ITS fight.
+        // Defence: pick a threat scoped to OUR fate only, then RE-ASSERT it every tick. If the
+        // backend has yanked the target onto anything that is NOT one of our fate's enemies, we
+        // forcibly take it back (or clear it) so the rotation can't keep hitting the foreign mob.
         var threat = FateTargeting.GetActiveDefendThreat(_targetFateId)
                      ?? FateTargeting.GetNearestFateEnemy(_targetFateId);
-        if (threat != null
-            && (Svc.Targets.Target is not IBattleNpc cur || cur.GameObjectId != threat.GameObjectId))
-            Svc.Targets.Target = threat;
-        if (threat != null) FateTargeting.StartAutoAttack(threat);
+
+        var curTarget = Svc.Targets.Target as IBattleNpc;
+        var curIsOurFateEnemy = curTarget != null && FateTargeting.IsFateEnemy(curTarget, _targetFateId);
+        if (threat != null)
+        {
+            // Re-assert every tick (not just on change): the backend may have switched to a foreign
+            // mob since last tick. Only keep the current target if it's already one of OUR fate's
+            // enemies (don't yank a valid in-fate target mid-cast).
+            if (!curIsOurFateEnemy)
+                Svc.Targets.Target = threat;
+            FateTargeting.StartAutoAttack(threat);
+        }
+        else if (curTarget != null && !curIsOurFateEnemy)
+        {
+            // No threat in OUR fate, but the backend has locked onto something foreign (e.g. a
+            // pass-through fate's mob). Clear it so the rotation stops attacking it — we just want
+            // to keep escorting.
+            Svc.Targets.Target = null;
+        }
 
         // After clicking Yes to start the fate, the escort NPC takes ~3s to (re)spawn and begin
         // walking. Wait that out before chasing so we don't path to the pre-start NPC position.
@@ -1164,7 +1349,11 @@ public sealed unsafe class FarmingController
         IBattleNpc? escortNpc;
         if (_escortNpcId == 0)
         {
-            escortNpc = FateTargeting.GetDefendedFriendlies(_targetFateId).FirstOrDefault();
+            // Prefer the game-designated MotivationNpc; only fall back to the nearest our-fate
+            // friendly for true Escort-typed fates that somehow expose no MotivationNpc.
+            var motivationId = FateTargeting.GetFateMotivationNpcId(_targetFateId);
+            escortNpc = (motivationId != 0 ? Svc.Objects.FirstOrDefault(o => o.GameObjectId == motivationId) as IBattleNpc : null)
+                        ?? FateTargeting.GetDefendedFriendlies(_targetFateId).FirstOrDefault();
             if (escortNpc != null) _escortNpcId = escortNpc.GameObjectId; // lock it in for the fate
         }
         else
@@ -1178,46 +1367,128 @@ public sealed unsafe class FarmingController
         if (escortNpc == null || escortNpc.IsDead)
         {
             // Can't resolve the NPC right now — hold position (don't run to the trailing center).
+            Diag("Escort", "npc", $"escort NPC unresolved/dead (cachedId={_escortNpcId}) -> holding");
             Navigator.Stop();
             return;
         }
         var followPos = escortNpc.Position;
+        Diag("Escort", "follow", $"npc='{escortNpc.Name}' id={_escortNpcId} threat={(threat?.Name.ToString() ?? "<null>")} curTarget={(curTarget?.Name.ToString() ?? "<null>")} curIsOurFate={curIsOurFateEnemy} distToNpc={Vector3.Distance(Player.Object?.Position ?? followPos, followPos):F1}");
 
         // MOVEMENT: WE own movement for the entire escort. The old code toggled BMR movement on/off
         // every tick based on distance — that made the character chase a mob (BMR) then get yanked
         // back to the NPC (us), flapping back and forth ("walking away and back over and over").
         // Instead: forbid BMR movement ONCE (set-guarded so no chat spam) and always drive movement
-        // ourselves toward the NPC. BMR still fights/dodges in place; the rotation kills our target.
-        // Enemies aggroed on us get dragged to the NPC because we stay glued to it.
+        // ourselves. BMR still fights/dodges in place; the rotation kills our target.
         if (BmrMovementActive())
             IPCManager.SetBmrMovement(false); // change-guarded internally; only fires once
 
         var me = Player.Object;
         if (me == null) { Navigator.Stop(); return; }
-        var distToNpc = Vector3.Distance(me.Position, followPos);
 
-        // Stay glued to the NPC (mobs always attack the NPC, so we don't chase them). Hysteresis so
-        // we don't flap: start chasing past 5y, stop once within 2.5y. FollowMoveTo re-issues as the
-        // NPC drifts.
-        const float chaseStart = 5f;
-        const float chaseStop = 2.5f;
+        // INTERCEPT MODE (always on): the escort mobs all path toward the NPC to attack it. Rather
+        // than standing on the NPC and waiting, we run OUT to the nearest un-aggroed fate enemy and
+        // body-pull it — then return to the NPC so the aggroed mob (now chasing US) gets dragged
+        // back inward. NO distance limit: we intercept any of OUR fate's enemies regardless of how
+        // far they are. Once everything is already aggroed onto us, we fall through to gluing on the
+        // NPC (mobs follow us there).
+        {
+            var interceptee = FindEscortInterceptTarget(followPos);
+            if (interceptee != null)
+            {
+                // Target it so the rotation opens up the moment we're in range, and body-pull it.
+                if (Svc.Targets.Target is not IBattleNpc it || it.GameObjectId != interceptee.GameObjectId)
+                    Svc.Targets.Target = interceptee;
+                FateTargeting.StartAutoAttack(interceptee);
+
+                var distToMob = Vector3.Distance(me.Position, interceptee.Position);
+                var engage = Math.Max(2.5f, interceptee.HitboxRadius + 2.5f);
+                if (distToMob > engage)
+                {
+                    _escortChasing = false; // we're not in NPC-glue mode while intercepting
+                    if (!ECommons.GenericHelpers.IsOccupied())
+                        Navigator.FollowMoveTo(C, interceptee.Position, engage);
+                    StatusText = $"Escort: intercepting {interceptee.Name}";
+                    return;
+                }
+                // In range — it's now aggroed onto us. Head back to the NPC to drag it inward; the
+                // next tick will pick the next un-aggroed mob (or glue to the NPC if none remain).
+                Navigator.FollowMoveTo(C, followPos, EscortNpcGlueStop);
+                StatusText = $"Escort: pulling {interceptee.Name} back to NPC";
+                return;
+            }
+        }
+
+        // GLUE TO NPC (default, and the intercept fall-through once all nearby mobs are pulled):
+        // stay on the NPC so any aggroed mobs cluster on it / on us. Hysteresis so we don't flap:
+        // start chasing past EscortNpcGlueStart, stop once within EscortNpcGlueStop. FollowMoveTo
+        // re-issues as the NPC drifts.
+        var distToNpc = Vector3.Distance(me.Position, followPos);
         if (_escortChasing)
         {
-            if (distToNpc <= chaseStop) { _escortChasing = false; Navigator.Stop(); }
-            else Navigator.FollowMoveTo(C, followPos, chaseStop);
+            if (distToNpc <= EscortNpcGlueStop) { _escortChasing = false; Navigator.Stop(); }
+            else Navigator.FollowMoveTo(C, followPos, EscortNpcGlueStop);
         }
         else
         {
-            if (distToNpc > chaseStart) { _escortChasing = true; Navigator.FollowMoveTo(C, followPos, chaseStop); }
+            if (distToNpc > EscortNpcGlueStart) { _escortChasing = true; Navigator.FollowMoveTo(C, followPos, EscortNpcGlueStop); }
             else Navigator.Stop();
         }
+    }
+
+    private const float EscortNpcGlueStart = 5f;
+    private const float EscortNpcGlueStop = 2.5f;
+
+    /// <summary>
+    /// Pick the best un-aggroed fate enemy to intercept during an escort: the nearest one to US (so
+    /// we minimize travel). NO distance limit — we intercept any of OUR fate's enemies regardless of
+    /// how far they are. Enemies already aggroed onto us are skipped (already being dragged in).
+    /// Returns null when there's nothing left to run out for (→ glue to NPC).
+    /// </summary>
+    private IBattleNpc? FindEscortInterceptTarget(Vector3 npcPos)
+    {
+        var me = Player.Object;
+        if (me == null) return null;
+        var myId = me.GameObjectId;
+        var chocoId = FateTargeting.GetChocoboId();
+
+        IBattleNpc? best = null;
+        var bestSq = float.MaxValue;
+        foreach (var e in FateTargeting.GetFateEnemies(_targetFateId)) // nearest-to-us first
+        {
+            if (FateTargeting.IsAggroedOnUs(e, myId, chocoId)) continue;     // already pulled
+            var d = Vector3.DistanceSquared(me.Position, e.Position);
+            if (d < bestSq) { bestSq = d; best = e; }
+        }
+        return best;
+    }
+
+    /// <summary>
+    /// Clear per-fate carry-over state. CRITICAL: escort/collect state (especially the cached escort
+    /// NPC id) must be wiped whenever we move to a NEW fate, not only via OnFateFinished — an escort
+    /// fate can end WITHOUT OnFateFinished (expired, abandoned, completed by other players). If the
+    /// stale _escortNpcId leaked into the next fate, hasEscortNpc stayed true and we'd run the escort
+    /// handler forever on a non-escort fate, holding while "looking for" a dead NPC.
+    /// </summary>
+    private void ResetPerFateState()
+    {
+        _escortNpcId = 0;
+        _escortChasing = false;
+        _engagedTargetId = 0;
+        _collectInteractObjId = 0;
+        _collectInteractCooldownMs = 0;
+        _yieldUntilMs = 0;
+        _fatePosSampled = false;
+        _ringMovedFollow = false;
     }
 
     private void OnFateFinished()
     {
         Stats.OnFateCompleted();
+        Features.ChocoboManager.CheckXpGainAfterFate(); // detect rank-cap stall (no XP gained this fate)
         Navigator.Stop();
         _yieldUntilMs = 0; // clear the smart-mix yield latch
+        _engagedTargetId = 0; // drop the sticky combat target so the next fate re-selects fresh
+        TextAdvanceIPC.Disable(); // release collect turn-in control (no-op if we never took it)
 
         // In Shared FATEs mode, re-open the Shared FATE window to repopulate per-zone progress, but
         // only every 5 completed fates (opening the window is disruptive, so we don't do it every
@@ -1245,9 +1516,9 @@ public sealed unsafe class FarmingController
 
         _targetFateId = 0;
         _startedFateId = 0;
+        _fateNpcInteractedMs = 0;
         _fateStartConfirmedMs = 0;
-        _escortNpcId = 0;
-        _escortChasing = false;
+        ResetPerFateState();
         _dismountedForNpcMs = 0;
         // Escort may have forbidden BMR movement — hand it back so the next fate behaves normally.
         if (BmrMovementActive()) IPCManager.SetBmrMovement(true);
@@ -1289,10 +1560,12 @@ public sealed unsafe class FarmingController
         var hostile = attackers.Count > 0 ? attackers[0]
                     : (InCombat() ? FateTargeting.GetNearestHostile() : null);
 
+        Diag("Combat", "clearaggro", $"attackers={attackers.Count} hostile={(hostile?.Name.ToString() ?? "<null>")} inCombat={InCombat()}");
+
         if (hostile == null)
         {
             Navigator.Stop();
-            IPCManager.StopCombat(C);
+            SetCombatBackend(false);
             State = FarmState.SelectingFate;
             return;
         }
@@ -1303,7 +1576,7 @@ public sealed unsafe class FarmingController
             Svc.Targets.Target = attacker;
 
         StatusText = $"Clearing stray aggro: {attacker.Name}";
-        IPCManager.StartCombat(C); // make the rotation backend fight it
+        SetCombatBackend(true); // make the rotation backend fight it
 
         // Walk into range if the backend isn't moving us.
         var me = Player.Object;
@@ -1350,13 +1623,13 @@ public sealed unsafe class FarmingController
         // OnFateFinished sets State=SelectingFate, and the top-of-tick follow redirect resumes us
         // here to follow the leader again.
         var fate = FateSelector.GetCurrentFate();
-        if (fate != null && (C.EnabledFateTypes & FateSelector.Classify(fate)) != 0)
+        if (fate != null)
         {
             Navigator.Stop();
             _targetFateId = fate.FateId;
             _startedFateId = 0;
-            _collectTurnedIn = 0;
-            _collectEstimatedNeeded = 0;
+            _fateNpcInteractedMs = 0;
+            ResetPerFateState(); // clear escort/collect carry-over from any previous fate
             // Route through TravelingToFate (NOT straight to InFate) so we walk to the fate CENTER —
             // same dropoff as normal farming. GetCurrentFate triggers at the ring EDGE, and InFate
             // only re-centers when outside the ring, so jumping straight to InFate left us stranded
@@ -1412,6 +1685,11 @@ public sealed unsafe class FarmingController
         if (C.ChocoboLevelingEnabled && ChocoboStableRoutine.NeedsAttention(C))
         {
             ChocoboStableRoutine.ResetSteps(); // fresh stable step machine each time we enter
+            // The stable is a CUSTOM menu flow we drive ourselves (SelectString "Tend to my Chocobo"
+            // + Fetch Yes/No). TextAdvance, enabled session-wide, would auto-handle those addons and
+            // race/hijack our manual menu logic — that's what broke the fetch step. Release TA for
+            // the whole stable cycle; we re-enable it when the routine finishes (TickChocoboLeveling).
+            TextAdvanceIPC.Disable();
             State = FarmState.ChocoboLeveling;
             return true;
         }
@@ -1431,8 +1709,7 @@ public sealed unsafe class FarmingController
             // Remember where we came from so we can return straight to it when shopping is done.
             // Always return to SelectingZone after shopping — we'll be in the vendor's zone and need
             // to re-pick + travel back to a farming zone for the current mode.
-            _stateBeforeShop = FarmState.SelectingZone;
-            State = FarmState.GemstoneShopping;
+            EnterShopping();
             return true;
         }
 
@@ -1474,7 +1751,14 @@ public sealed unsafe class FarmingController
         StatusText = "Chocobo leveling";
         if (ChocoboStableRoutine.Tick(C))
         {
-            // Routine finished (either fed & ready, or chocobo maxed).
+            // Stable cycle done — hand dialogue back to TextAdvance for normal fate/turn-in flow.
+            TextAdvanceIPC.Enable();
+            // Routine finished. We can't verify possession HERE: we're in the housing district where
+            // the chocobo CANNOT be summoned, so IsSummoned() would always be false. Instead, arm the
+            // possession failsafe (VerifyChocoboFetched): once we're back in a fate zone we try to
+            // summon, and if that fails the chocobo is still stabled -> force-fetch.
+            _verifyChocoboFetched = true;
+            _verifyFetchSinceMs = 0;
             if (C.StopAtChocoboMaxed && ChocoboManager.ReachedTargetLevel(C))
                 Stop(StopReason.ChocoboMaxed);
             else
@@ -1482,44 +1766,116 @@ public sealed unsafe class FarmingController
         }
     }
 
+    private bool _verifyChocoboFetched; // armed after a stable cycle: confirm the chocobo is in our possession
+    private long _verifyFetchSinceMs;   // when we entered a fate zone + started trying to summon (0 = not yet)
+    private const long VerifyFetchGraceMs = 12_000; // allow this long for a summon to succeed before force-fetching
+
+    /// <summary>
+    /// Possession failsafe (runs every tick while armed). We CANNOT check possession in the housing
+    /// district (the chocobo can't be summoned there). So once the stable cycle finishes and we're
+    /// back in an actual fate zone (TerritoryIntendedUse == 1): try to summon the chocobo. If it
+    /// summons, it's in our possession -> done. If it will NOT summon within a grace window, the
+    /// chocobo is still stuck in the stable -> go home and force-fetch it (close dialogues, Tend,
+    /// Fetch, Yes). Returns true if it took over control this tick (caller should not run normal flow).
+    /// </summary>
+    private bool TickVerifyChocoboFetched()
+    {
+        if (!_verifyChocoboFetched) return false;
+        if (!C.ChocoboLevelingEnabled) { _verifyChocoboFetched = false; return false; }
+
+        // Only meaningful in a zone where the chocobo CAN be summoned (open-world fate zones).
+        var terr = ECommons.GameHelpers.Player.Territory.ValueNullable;
+        var canSummonHere = terr != null && terr.Value.TerritoryIntendedUse.RowId == 1;
+        if (!canSummonHere) return false; // still in housing / loading — wait until we're in a fate zone
+
+        // Already summoned -> possession confirmed, disarm.
+        if (ChocoboManager.IsSummoned())
+        {
+            _verifyChocoboFetched = false;
+            Svc.Log.Information("[Chocobo] Possession confirmed (chocobo summoned); failsafe cleared.");
+            return false;
+        }
+
+        // Not summoned yet: try to summon, and start the grace timer on first attempt.
+        if (_verifyFetchSinceMs == 0) _verifyFetchSinceMs = Environment.TickCount64;
+        ChocoboManager.UseGysahlGreens(); // throttled internally; no-op if no greens
+
+        // Within the grace window, keep trying to summon.
+        if (Environment.TickCount64 - _verifyFetchSinceMs < VerifyFetchGraceMs)
+        {
+            StatusText = "Verifying chocobo fetched (summoning)";
+            return false;
+        }
+
+        // Grace expired and STILL not summoned -> the chocobo is stuck in the stable. Force-fetch it.
+        Svc.Log.Warning("[Chocobo] Chocobo failed to summon in a fate zone -> still stabled. Forcing fetch.");
+        _verifyChocoboFetched = false;
+        _verifyFetchSinceMs = 0;
+        ChocoboStableRoutine.BeginForceFetch();
+        TextAdvanceIPC.Disable(); // stable menus are driven manually, not via TextAdvance
+        State = FarmState.ChocoboLeveling;
+        return true;
+    }
+
+    /// <summary>Enter the gemstone-shopping state for a fresh visit (clears the per-visit latch).</summary>
+    private void EnterShopping()
+    {
+        _stateBeforeShop = FarmState.SelectingZone;
+        _shoppingDone = false; // fresh visit: allow interacting/buying again
+        State = FarmState.GemstoneShopping;
+    }
+
+    /// <summary>
+    /// Conclude the current shopping visit: latch DONE, record the gem count so we don't re-enter
+    /// until we've farmed more, close the window if it's open, and only leave the state once the
+    /// window is actually gone. While latched, the rest of TickGemstoneShopping refuses to
+    /// re-interact the vendor — this is what stops the open->buy->close->reopen loop.
+    /// </summary>
+    private void FinishShopping()
+    {
+        _shoppingDone = true;
+        _gemCountAfterLastShop = Features.InventoryUtil.GetGemstoneCount();
+        if (GemstoneShopper.ShopOpen())
+        {
+            if (EzThrottler.Throttle("AF_CloseShop", 300))
+                GemstoneShopper.CloseShop();
+            return; // wait for it to actually close before leaving the state
+        }
+        State = _stateBeforeShop;
+    }
+
     private unsafe void TickGemstoneShopping()
     {
         StatusText = "Gemstone shopping";
 
+        // PER-VISIT DONE LATCH: once a visit is judged complete we ONLY close + leave; we never fall
+        // through to re-target/re-interact the vendor (ShouldShop can still read true for continuous
+        // entries, which is exactly what used to reopen the window in a loop).
+        if (_shoppingDone)
+        {
+            FinishShopping();
+            return;
+        }
+
         // TOP-OF-TICK COMPLETION GUARD (works whether the shop is open or not): if every enabled
-        // buy entry has reached its target item count, we're DONE. Close the shop if it's still up,
-        // then go straight back to farming. This runs BEFORE the navigate/interact fall-through so
-        // we never re-open the shop after finishing.
+        // capped buy entry has reached its target item count AND there are no continuous entries,
+        // we're DONE. This catches completion even before the shop opens.
         var hasContinuous = C.GemstoneBuyList.Any(e => e.Enabled && e.TargetQuantity == 0);
         if (!hasContinuous && GemstoneShopper.AllTargetsMet(C))
         {
-            _gemCountAfterLastShop = Features.InventoryUtil.GetGemstoneCount();
-            if (GemstoneShopper.ShopOpen())
-            {
-                if (EzThrottler.Throttle("AF_CloseShop", 300))
-                    GemstoneShopper.CloseShop();
-                return; // wait for it to actually close before leaving
-            }
-            State = _stateBeforeShop;
+            FinishShopping();
             return;
         }
 
         // If the shop addon is open, buy until done. FORCIBLE COMPLETION: the instant there's
-        // nothing left we can AND want to buy (every entry is at its target threshold or
-        // unaffordable), yank control back to whatever we were doing before. This check only runs
-        // while the shop is OPEN (item costs are only readable then) so we don't bail mid-travel.
+        // nothing left we can AND want to buy (every entry capped, unaffordable, or — for continuous
+        // entries — drained back to the threshold), latch DONE and leave. This check only runs while
+        // the shop is OPEN (item costs are only readable then) so we don't bail mid-travel.
         if (GemstoneShopper.ShopOpen())
         {
             if (GemstoneShopper.BuyingComplete(C))
             {
-                _gemCountAfterLastShop = Features.InventoryUtil.GetGemstoneCount();
-                // Keep firing CloseShop until the window is actually gone, THEN leave the state.
-                // Leaving early would orphan an open shop window (the bug you saw).
-                if (EzThrottler.Throttle("AF_CloseShop", 300))
-                {
-                    if (GemstoneShopper.CloseShop())
-                        State = _stateBeforeShop;
-                }
+                FinishShopping();
                 return;
             }
             GemstoneShopper.PurchaseTick(C);
@@ -1527,11 +1883,12 @@ public sealed unsafe class FarmingController
         }
 
         // Interacting with the vendor often pops Talk dialogue (greeting) BEFORE the shop addon
-        // opens — spam-click through it so we reach the menu. Gate on IsAddonReady to avoid NREs.
+        // opens. TextAdvance (session-wide) advances it for us; only spam-click it ourselves as a
+        // FALLBACK when TextAdvance isn't installed. Gate on IsAddonReady to avoid NREs.
         if (ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>("Talk", out var gtalk)
             && ECommons.GenericHelpers.IsAddonReady(gtalk))
         {
-            if (EzThrottler.Throttle("AF_GemTalk", 200))
+            if (!TextAdvanceIPC.ControlActive && EzThrottler.Throttle("AF_GemTalk", 200))
             {
                 try { new ECommons.UIHelpers.AddonMasterImplementations.AddonMaster.Talk((nint)gtalk).Click(); }
                 catch (Exception e) { Svc.Log.Verbose($"[Gemstone] Talk click failed: {e.Message}"); }

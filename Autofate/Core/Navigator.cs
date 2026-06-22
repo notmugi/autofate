@@ -13,7 +13,11 @@ namespace Autofate.Core;
 public static class Navigator
 {
     private static Vector3 _currentDest;
+    private static Vector3 _lastIssuedDest; // last dest we actually sent to vnavmesh (re-issue when this changes)
     private static bool _active;
+    // How far the destination must shift before we re-issue a path. Keeps us from spamming
+    // PathfindAndMoveCloseTo for tiny mob/NPC drift each frame.
+    private const float RepathThreshold = 2f;
 
     /// <summary>Distance to the current destination, or float.MaxValue if not navigating.</summary>
     public static float DistanceToDest()
@@ -73,9 +77,16 @@ public static class Navigator
             MountManager.Sprint();
 
         // Hand the destination to vnavmesh; let it perform takeoff itself (don't manually jump).
-        if (!NavmeshIPC.IsRunning() && !NavmeshIPC.PathfindInProgress())
+        // RE-ISSUE when the destination has shifted meaningfully since the last path we sent —
+        // otherwise after killing mob A we'd stay idling toward A's last position while already
+        // targeting mob B (vnav.IsRunning was still true, so we'd skip re-pathing and stand still
+        // staring at the new target). We also issue when nothing is running/pathfinding.
+        var destChanged = Vector3.DistanceSquared(_lastIssuedDest, dest) > RepathThreshold * RepathThreshold;
+        var idle = !NavmeshIPC.IsRunning() && !NavmeshIPC.PathfindInProgress();
+        if (idle || destChanged)
         {
             NavmeshIPC.PathfindAndMoveCloseTo(dest, stopRange, fly && MountManager.IsMounted);
+            _lastIssuedDest = dest;
         }
 
         return false;
@@ -135,5 +146,8 @@ public static class Navigator
             NavmeshIPC.Stop();
             _active = false;
         }
+        // Clear the last-issued dest so the next MoveTo unconditionally re-issues a path (even if
+        // it targets roughly the same position as before).
+        _lastIssuedDest = default;
     }
 }

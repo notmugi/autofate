@@ -21,8 +21,6 @@ public sealed class Plugin : IDalamudPlugin
         ECommonsMain.Init(pi, this, Module.DalamudReflector);
         MigrateLegacyConfig(pi); // one-time copy of pre-rename "AutoFates" settings
         C = EzConfig.Init<Configuration>();
-        // Collect fates are WIP/disabled — never keep them enabled in the mask (UI can't toggle it).
-        C.EnabledFateTypes &= ~FateType.Collect;
 
         IPC.IPCManager.Init();
         Controller = new Core.FarmingController();

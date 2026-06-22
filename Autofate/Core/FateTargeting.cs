@@ -239,10 +239,26 @@ public static unsafe class FateTargeting
         return null;
     }
 
-    /// <summary>True if this fate enemy is aggroed onto us (or our chocobo) — i.e. in combat and
-    /// targeting us. These are the mobs already "pulled" onto our pile.</summary>
+    /// <summary>
+    /// True if this fate enemy is part of our "pile". We count it as pulled if it is directly
+    /// targeting us / our chocobo, OR — to align with BMR's broader <c>AggroPlayer</c> semantics so
+    /// our nav-driven pull cap and BMR's MaxTargets agree at the boundary — if it's flagged in
+    /// combat and within a short radius of us (it has clearly been pulled even if it momentarily
+    /// retargets the chocobo or another player). The radius keeps distant in-combat mobs (engaged by
+    /// other players) out of our count.
+    /// </summary>
     public static bool IsAggroedOnUs(IBattleNpc bnpc, ulong myId, ulong chocoId)
-        => bnpc.TargetObjectId == myId || (chocoId != 0 && bnpc.TargetObjectId == chocoId);
+    {
+        if (bnpc.TargetObjectId == myId || (chocoId != 0 && bnpc.TargetObjectId == chocoId))
+            return true;
+        // Tolerance: in-combat fate mob hugging the pile counts as pulled.
+        var me = Player.Object;
+        if (me == null) return false;
+        var inCombat = (bnpc.StatusFlags & Dalamud.Game.ClientState.Objects.Enums.StatusFlags.InCombat) != 0;
+        if (!inCombat) return false;
+        const float pileRadius = 8f;
+        return Vector3.DistanceSquared(me.Position, bnpc.Position) <= pileRadius * pileRadius;
+    }
 
     /// <summary>
     /// Count fate enemies currently aggroed onto us/our chocobo (the real "pile" size for mass
@@ -304,10 +320,61 @@ public static unsafe class FateTargeting
     }
 
     /// <summary>
-    /// The turn-in NPC for a collect fate: a non-enemy object with this FateId carrying a nameplate
-    /// icon. (Same detection as the start NPC, but used for collect hand-ins.)
+    /// The turn-in NPC for a collect fate. Resolves AUTHORITATIVELY from the live FateContext's
+    /// ObjectiveNpc entity id (the game tells us exactly which object is the hand-in NPC), the same
+    /// approach BMR/DWD use, rather than guessing via the nameplate "!" heuristic (which is flaky on
+    /// collect fates because the giver and the turn-in NPC can differ). Falls back to the "!"
+    /// heuristic only if the objective id isn't available yet.
     /// </summary>
-    public static IGameObject? GetCollectTurnInNpc(ushort fateId) => FindFateStartNpc(fateId);
+    public static IGameObject? GetCollectTurnInNpc(ushort fateId)
+    {
+        var objId = GetFateObjectiveNpcId(fateId);
+        if (objId != 0)
+        {
+            var npc = Svc.Objects.FirstOrDefault(o => o.GameObjectId == objId);
+            if (npc != null) return npc;
+        }
+        return FindFateStartNpc(fateId);
+    }
+
+    /// <summary>
+    /// Read the ObjectiveNpc entity id off the live FateContext for the given fate (0 if not the
+    /// current fate or unavailable). This is the hand-in / objective NPC the game itself designates.
+    /// </summary>
+    public static ulong GetFateObjectiveNpcId(ushort fateId)
+    {
+        if (fateId == 0) return 0;
+        try
+        {
+            var fm = FFXIVClientStructs.FFXIV.Client.Game.Fate.FateManager.Instance();
+            if (fm == null) return 0;
+            var cur = fm->CurrentFate;
+            if (cur == null || cur->FateId != fateId) return 0;
+            return cur->ObjectiveNpc;
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>
+    /// Read the game-designated MotivationNpc entity id off the live FateContext (0 if not the
+    /// current fate, unavailable, or unset). This is THE NPC the game ties the fate to — for escort
+    /// / follow fates it's the NPC you escort. This is exactly what the reference plugins key off
+    /// (their fate.MotivationNpc), NOT "any friendly NPC in the ring". Empty is 0xE0000000.
+    /// </summary>
+    public static ulong GetFateMotivationNpcId(ushort fateId)
+    {
+        if (fateId == 0) return 0;
+        try
+        {
+            var fm = FFXIVClientStructs.FFXIV.Client.Game.Fate.FateManager.Instance();
+            if (fm == null) return 0;
+            var cur = fm->CurrentFate;
+            if (cur == null || cur->FateId != fateId) return 0;
+            ulong id = cur->MotivationNpc;
+            return id == 0xE0000000 ? 0 : id; // 0xE0000000 = "no NPC"
+        }
+        catch { return 0; }
+    }
 
     /// <summary>Our chocobo companion's object id (object whose OwnerId == our id), or 0.</summary>
     public static ulong GetChocoboId()
@@ -321,6 +388,50 @@ public static unsafe class FateTargeting
             if (obj.OwnerId == myId) return obj.GameObjectId;
         }
         return 0;
+    }
+
+    /// <summary>
+    /// The fate id the game says we are CURRENTLY registered to (joined), or 0 if none. This is the
+    /// authoritative "what fate am I actually in" signal — the same thing BMR keys its targeting off
+    /// — and is distinct from a fate whose ring we merely pass through. When escorting an NPC that
+    /// walks through another fate, our joined fate stays the escort; the pass-through fate's mobs
+    /// carry a DIFFERENT FateId, so anything scoped to this id ignores them.
+    /// </summary>
+    public static ushort GetJoinedFateId()
+    {
+        try
+        {
+            var fm = FFXIVClientStructs.FFXIV.Client.Game.Fate.FateManager.Instance();
+            if (fm == null) return 0;
+            var cur = fm->CurrentFate;
+            return cur == null ? (ushort)0 : cur->FateId;
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>
+    /// Enemies attacking us (or our chocobo) that ALSO belong to the given fate. Nearest-first. Use
+    /// this instead of <see cref="GetEnemiesAttackingMe"/> while running a specific fate so that a
+    /// pass-through fate's mob landing a hit on us can't drag us into fighting its fate (the escort
+    /// cross-fate bug). FateId is authoritative: foreign-fate mobs are never included.
+    /// </summary>
+    public static List<IBattleNpc> GetFateEnemiesAttackingMe(ushort fateId)
+    {
+        var me = Player.Object;
+        var result = new List<IBattleNpc>();
+        if (me == null || fateId == 0) return result;
+        var myId = me.GameObjectId;
+        var chocoId = GetChocoboId();
+        foreach (var obj in Svc.Objects)
+        {
+            if (obj is not IBattleNpc bnpc) continue;
+            if (!IsFateEnemy(bnpc, fateId)) continue; // FateId-scoped + attackable
+            if (bnpc.TargetObjectId != myId && (chocoId == 0 || bnpc.TargetObjectId != chocoId)) continue;
+            result.Add(bnpc);
+        }
+        var mp = me.Position;
+        result.Sort((a, b) => Vector3.DistanceSquared(a.Position, mp).CompareTo(Vector3.DistanceSquared(b.Position, mp)));
+        return result;
     }
 
     public static List<IBattleNpc> GetEnemiesAttackingMe()

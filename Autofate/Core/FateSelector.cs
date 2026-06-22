@@ -70,15 +70,21 @@ public static class FateSelector
         return FateType.Battle;
     }
 
-    /// <summary>The hand-in item id for a collect FATE (0 if not a collect fate).</summary>
+    /// <summary>
+    /// The hand-in item id for a collect FATE (0 if not a collect fate). The authoritative source —
+    /// the one BMR/DWD key off — is the Fate sheet's <c>EventItem</c> row: that's the collectable
+    /// you pick up off the ground AND hand in. We prefer it, falling back to TurnIn/ReqEventItem
+    /// only if EventItem is somehow unset (older/edge fates), since those can resolve to a different
+    /// (wrong) row on some fates.
+    /// </summary>
     public static uint GetCollectItemId(IFate fate)
     {
         try
         {
             var data = fate.GameData;
             if (data.ValueNullable is not { } row) return 0;
+            if (row.EventItem.RowId != 0) return row.EventItem.RowId;       // authoritative
             if (row.TurnInEventItem.RowId != 0) return row.TurnInEventItem.RowId;
-            if (row.EventItem.RowId != 0) return row.EventItem.RowId;
             if (row.ReqEventItem.RowId != 0) return row.ReqEventItem.RowId;
         }
         catch { /* ignore */ }
@@ -124,8 +130,6 @@ public static class FateSelector
                 Svc.Log.Information($"[FateDiag] '{fate.Name}' id={fate.FateId} -> {type} | Rule={rule} "
                     + $"MapIcon={fate.MapIconId} Icon={fate.IconId} SheetIcon={sheetIcon} HandIn={SafeHandIn(fate)}");
             }
-
-            if ((c.EnabledFateTypes & type) == 0) continue;
 
             var dist = Vector3.Distance(myPos, fate.Position);
             list.Add(new Candidate(fate, type, dist, time));

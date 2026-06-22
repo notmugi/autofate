@@ -10,13 +10,13 @@ public sealed partial class MainWindow
         [CombatBackend.None] = "None",
         [CombatBackend.WrathCombo] = "Wrath Combo",
         [CombatBackend.RotationSolverReborn] = "Rotation Solver Reborn",
-        [CombatBackend.BossModReborn] = "BossMod Reborn (autorotation)",
+        [CombatBackend.BossModReborn] = "BossMod (Reborn or vanilla, autorotation)",
     };
 
     private static readonly Dictionary<CombatBackend, string> MovementNames = new()
     {
         [CombatBackend.None] = "vnavmesh only (recommended)",
-        [CombatBackend.BossModReborn] = "BossMod Reborn AI (movement + AOE dodge)",
+        [CombatBackend.BossModReborn] = "BossMod AI (Reborn or vanilla — movement + AOE dodge)",
     };
 
     private void DrawCombatTab()
@@ -51,15 +51,6 @@ public sealed partial class MainWindow
             ImGui.InputText("BMR preset name", ref preset, 128);
         }
         ImGui.SameLine(); ImGui.TextDisabled("(WIP)");
-
-        ImGui.Separator();
-        ImGui.TextUnformatted("Installed plugin detection:");
-        DrawDetect("vnavmesh", IPC.NavmeshIPC.IsInstalled);
-        DrawDetect("Lifestream", IPC.LifestreamIPC.IsInstalled);
-        DrawDetect("BossMod Reborn", IPC.BossModIPC.IsInstalled);
-        DrawDetect("Wrath Combo", IPC.WrathComboIPC.IsInstalled);
-        DrawDetect("Rotation Solver Reborn", IPC.RotationSolverIPC.IsInstalled);
-        DrawDetect("AutoRetainer", IPC.AutoRetainerIPC.IsInstalled);
     }
 
     private void DrawInstallState(CombatBackend backend)
@@ -71,11 +62,4 @@ public sealed partial class MainWindow
         else ImGuiEx.Text(new System.Numerics.Vector4(0.9f, 0.3f, 0.3f, 1f), "NOT installed");
     }
 
-    private static void DrawDetect(string name, bool installed)
-    {
-        var col = installed ? new System.Numerics.Vector4(0.3f, 0.9f, 0.3f, 1f) : new System.Numerics.Vector4(0.7f, 0.3f, 0.3f, 1f);
-        ImGui.Bullet();
-        ImGui.SameLine();
-        ImGuiEx.Text(col, $"{name}: {(installed ? "yes" : "no")}");
-    }
 }

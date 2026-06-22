@@ -94,6 +94,58 @@ public static unsafe class ChocoboManager
         return CurrentXP() >= max;
     }
 
+    // ----------------------------------------------------- empirical XP-stall detection
+    // When the chocobo hits its RANK CAP, the game forces its XP bar to 0 and it stays there until
+    // a Thavnairian Onion raises the cap. In that state CurrentXP() reads 0, so XpMaxed() (0 >= max)
+    // is ALWAYS false and never triggers stabling. The reliable signal is empirical: we ALWAYS kill
+    // mobs during a fate, so sample the chocobo's XP at fate start and compare at fate end. If the
+    // XP did not increase across a whole fate (and we're below rank 20), the cap is hit -> it needs
+    // an onion. One fate of killing is plenty to register XP if the chocobo can still earn any.
+    private static uint _xpAtFateStart;
+    private static bool _xpSampledThisFate;
+    /// <summary>True once a full fate granted the chocobo no XP -> at rank cap, needs an onion.</summary>
+    public static bool XpStalled { get; private set; }
+
+    /// <summary>Sample the chocobo's XP at the start of a fate (baseline for the gain check).</summary>
+    public static void SampleXpAtFateStart()
+    {
+        if (!IsSummoned() || Rank() >= 20) { _xpSampledThisFate = false; return; }
+        _xpAtFateStart = CurrentXP();
+        _xpSampledThisFate = true;
+    }
+
+    /// <summary>
+    /// At fate end, compare the chocobo's XP to the fate-start sample. A rise means it's still
+    /// leveling normally (clears the stall). No rise across a whole fate means the rank cap is hit
+    /// (sets XpStalled -> NeedsAttention triggers stabling). No-op if not sampled / not summoned /
+    /// already rank 20.
+    /// </summary>
+    public static void CheckXpGainAfterFate()
+    {
+        if (!_xpSampledThisFate) return;
+        _xpSampledThisFate = false;
+        if (!IsSummoned() || Rank() >= 20) { XpStalled = false; return; }
+
+        var xp = CurrentXP();
+        if (xp > _xpAtFateStart)
+        {
+            XpStalled = false; // earned XP this fate -> not capped
+        }
+        else
+        {
+            if (!XpStalled)
+                Svc.Log.Information($"[Chocobo] No XP gained over a full fate (xp={xp}, rank={Rank()}) -> rank cap hit, needs onion.");
+            XpStalled = true;
+        }
+    }
+
+    /// <summary>Reset the XP-stall tracking after feeding an onion (the rank cap was just raised).</summary>
+    public static void ResetXpStallTracking()
+    {
+        _xpSampledThisFate = false;
+        XpStalled = false;
+    }
+
     /// <summary>The currently active stance command (game value).</summary>
     public static byte ActiveCommand()
     {
