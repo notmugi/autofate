@@ -10,7 +10,7 @@ public sealed partial class MainWindow
         DrawCombatSection();
         ImGui.Separator();
 
-        ImGui.TextWrapped("Tune how the plugin picks and runs FATEs. All FATE types are always run — use the blacklist below to skip specific FATEs.");
+        ImGui.TextWrapped("Tune how the plugin picks and runs FATEs. Use the blacklist below to skip specific FATEs.");
         ImGui.Separator();
 
         const float numWidth = 90f;
