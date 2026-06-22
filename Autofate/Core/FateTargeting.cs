@@ -177,67 +177,7 @@ public static unsafe class FateTargeting
         return null;
     }
 
-    /// <summary>
-    /// Defend-fate targeting: pick the enemy that is attacking one of the protected friendlies,
-    /// nearest such enemy first. Falls back to the nearest fate enemy if none are currently
-    /// targeting a friendly. Returns null if there are no fate enemies at all.
-    /// </summary>
-    public static IBattleNpc? GetDefendTarget(ushort fateId)
-    {
-        var enemies = GetFateEnemies(fateId);
-        if (enemies.Count == 0) return null;
-
-        var friendlies = GetDefendedFriendlies(fateId);
-        if (friendlies.Count == 0) return enemies[0]; // nothing to defend yet -> nearest enemy
-
-        var friendlyIds = new HashSet<ulong>();
-        foreach (var f in friendlies) friendlyIds.Add(f.GameObjectId);
-
-        // Enemies already locked onto a protected friendly (these are the real threat). enemies is
-        // already nearest-first, so the first match is the closest threat.
-        foreach (var e in enemies)
-            if (e.TargetObjectId != 0 && friendlyIds.Contains(e.TargetObjectId))
-                return e;
-
-        // No enemy targeting a friendly right now -> just clear the nearest enemy.
-        return enemies[0];
-    }
-
     public static int CountFateEnemies(ushort fateId) => GetFateEnemies(fateId).Count;
-
-    /// <summary>Count live fate enemies within <paramref name="range"/> yalms of the player.</summary>
-    public static int CountFateEnemiesWithin(ushort fateId, float range)
-    {
-        var me = Player.Object;
-        if (me == null) return 0;
-        var n = 0;
-        var rSq = range * range;
-        foreach (var e in GetFateEnemies(fateId))
-            if (Vector3.DistanceSquared(me.Position, e.Position) <= rSq) n++;
-        return n;
-    }
-
-    /// <summary>
-    /// Mass-pull target picker: the nearest fate enemy that is NOT already gathered up on us (i.e.
-    /// further than <paramref name="gatheredRange"/>) but still within <paramref name="leashRange"/>
-    /// so we body-pull nearby stragglers into the pile WITHOUT sprinting across the whole fate.
-    /// Returns null if there's nothing to pull within the leash (or no enemies at all).
-    /// </summary>
-    public static IBattleNpc? GetNearestUngatheredEnemy(ushort fateId, float gatheredRange, float leashRange)
-    {
-        var me = Player.Object;
-        if (me == null) return null;
-        var gSq = gatheredRange * gatheredRange;
-        var lSq = leashRange * leashRange;
-        foreach (var e in GetFateEnemies(fateId)) // nearest-first
-        {
-            var d = Vector3.DistanceSquared(me.Position, e.Position);
-            if (d <= gSq) continue;       // already gathered on us
-            if (d > lSq) return null;      // nearest ungathered is beyond leash -> don't chase
-            return e;
-        }
-        return null;
-    }
 
     /// <summary>
     /// True if this fate enemy is part of our "pile". We count it as pulled if it is directly
@@ -389,50 +329,6 @@ public static unsafe class FateTargeting
         return 0;
     }
 
-    /// <summary>
-    /// The fate id the game says we are CURRENTLY registered to (joined), or 0 if none. This is the
-    /// authoritative "what fate am I actually in" signal — the same thing BMR keys its targeting off
-    /// — and is distinct from a fate whose ring we merely pass through. When escorting an NPC that
-    /// walks through another fate, our joined fate stays the escort; the pass-through fate's mobs
-    /// carry a DIFFERENT FateId, so anything scoped to this id ignores them.
-    /// </summary>
-    public static ushort GetJoinedFateId()
-    {
-        try
-        {
-            var fm = FFXIVClientStructs.FFXIV.Client.Game.Fate.FateManager.Instance();
-            if (fm == null) return 0;
-            var cur = fm->CurrentFate;
-            return cur == null ? (ushort)0 : cur->FateId;
-        }
-        catch { return 0; }
-    }
-
-    /// <summary>
-    /// Enemies attacking us (or our chocobo) that ALSO belong to the given fate. Nearest-first. Use
-    /// this instead of <see cref="GetEnemiesAttackingMe"/> while running a specific fate so that a
-    /// pass-through fate's mob landing a hit on us can't drag us into fighting its fate (the escort
-    /// cross-fate bug). FateId is authoritative: foreign-fate mobs are never included.
-    /// </summary>
-    public static List<IBattleNpc> GetFateEnemiesAttackingMe(ushort fateId)
-    {
-        var me = Player.Object;
-        var result = new List<IBattleNpc>();
-        if (me == null || fateId == 0) return result;
-        var myId = me.GameObjectId;
-        var chocoId = GetChocoboId();
-        foreach (var obj in Svc.Objects)
-        {
-            if (obj is not IBattleNpc bnpc) continue;
-            if (!IsFateEnemy(bnpc, fateId)) continue; // FateId-scoped + attackable
-            if (bnpc.TargetObjectId != myId && (chocoId == 0 || bnpc.TargetObjectId != chocoId)) continue;
-            result.Add(bnpc);
-        }
-        var mp = me.Position;
-        result.Sort((a, b) => Vector3.DistanceSquared(a.Position, mp).CompareTo(Vector3.DistanceSquared(b.Position, mp)));
-        return result;
-    }
-
     public static List<IBattleNpc> GetEnemiesAttackingMe()
     {
         var me = Player.Object;
@@ -492,66 +388,5 @@ public static unsafe class FateTargeting
             am->UseAction(FFXIVClientStructs.FFXIV.Client.Game.ActionType.Action, 7, target.GameObjectId);
         }
         catch (System.Exception e) { Svc.Log.Verbose($"[Combat] StartAutoAttack failed: {e.Message}"); }
-    }
-
-    /// <summary>Ensure we're targeting the nearest enemy attacking us. Returns it, or null if none.</summary>
-    public static IBattleNpc? EnsureAttackerTarget()
-    {
-        if (Svc.Targets.Target is IBattleNpc cur && !cur.IsDead && cur.CurrentHp > 0
-            && cur is { } c && c.TargetObjectId == (Player.Object?.GameObjectId ?? 0))
-            return cur;
-        var list = GetEnemiesAttackingMe();
-        if (list.Count == 0) return null;
-        Svc.Targets.Target = list[0];
-        return list[0];
-    }
-
-    /// <summary>
-    /// Ensure we have a live FATE enemy targeted. Returns the target (existing or newly set), or
-    /// null if there are no fate enemies in range. Only retargets when the current target isn't a
-    /// valid fate enemy, so we don't yank the target away from the combat backend mid-cast.
-    /// </summary>
-    public static IBattleNpc? EnsureFateTarget(ushort fateId, bool defendPriority = false)
-    {
-        // For Defend fates, ALWAYS prefer the enemy threatening a protected friendly, even if our
-        // current target is a valid enemy — the threat to the NPC takes priority.
-        if (defendPriority)
-        {
-            var threat = GetDefendTarget(fateId);
-            if (threat != null)
-            {
-                if (Svc.Targets.Target is not IBattleNpc curt || curt.GameObjectId != threat.GameObjectId)
-                    Svc.Targets.Target = threat;
-                return threat;
-            }
-        }
-
-        // PRIORITY: if anything is actually attacking us (or our chocobo), deal with the nearest
-        // attacker first — standing still pointing at a distant mob while others beat on us is the
-        // bug we're fixing. Only switch if our current target ISN'T already one of the attackers.
-        var attackers = GetEnemiesAttackingMe();
-        if (attackers.Count > 0)
-        {
-            var curId = (Svc.Targets.Target as IBattleNpc)?.GameObjectId ?? 0;
-            var alreadyOnAttacker = attackers.Exists(a => a.GameObjectId == curId);
-            if (!alreadyOnAttacker)
-            {
-                // Prefer an attacker that belongs to this fate; otherwise the nearest attacker.
-                var fa = attackers.Find(a => IsFateEnemy(a, fateId)) ?? attackers[0];
-                Svc.Targets.Target = fa;
-                return fa;
-            }
-            // Current target is already an attacker — keep it (don't yank mid-cast).
-            return Svc.Targets.Target as IBattleNpc;
-        }
-
-        // Keep the current target if it's still a valid fate enemy.
-        if (Svc.Targets.Target is IBattleNpc cur && IsFateEnemy(cur, fateId))
-            return cur;
-
-        var next = GetNearestFateEnemy(fateId);
-        if (next != null)
-            Svc.Targets.Target = next;
-        return next;
     }
 }

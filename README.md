@@ -70,10 +70,7 @@ Collection modes (Atma/Demiatma/Luminous/Memories) track the required items in y
 These are present in the code but **disabled/greyed in the UI**. They're good first
 contributions — search the code for `TODO(WIP)` to find each one:
 
-- **Collect fates** — classification + item tracking exist, but the turn-in loop needs some work. at the moment, I'm struggling to get the plugin to correctly follow the desired loop for turnins. Talk to NPC -> spam through dialogue -> accept YesNo dialogue -> collect materials and do battle -> turn in items at NPC. currently, the most problematic part of this whole thing is turning in the items. it just loops over and over trying to open the turnin dialogue and gets stuck. contributions would be massively helpful here <333
-- **Escort fates** Work... but some have some minor problems like the one in camp bluefog that sometimes walks through another fate. please contribute with a PR if you know how to fix this behavior!
 - **Mender NPC repair** — only self-repair is automated; NPC routing is unfinished. I didnt have the time, money, or energy to implement a second form of repairs, i work a full time job and just wanted a product that is in a good working state. if you know how to get this working, that would be fantastic. an example of navigating the repair window is currently already available through self repair, and an example of setting a desired npc location is available through the bicolor shop and alternatively through the chocobo stable section.
-- **BMR autorotation preset** — the preset and IPC are there, but its not hooked up properly and seems to fail starting combat. for now, only wrath and RSR are supported, but help here would also be appreciated greatly.
 
 ---
 ## Installing

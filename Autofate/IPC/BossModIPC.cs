@@ -45,8 +45,6 @@ public static class BossModIPC
 
     public static bool IsInstalled => InstalledVariant != Variant.None;
 
-    /// <summary>True when the loaded fork is CombatReborn's BossModReborn.</summary>
-    public static bool IsReborn => InstalledVariant == Variant.Reborn;
 
     /// <summary>Human-readable name of whichever fork is loaded (for UI/diagnostics).</summary>
     public static string DisplayName => InstalledVariant switch
@@ -214,10 +212,6 @@ public static class BossModIPC
     public static void AiFollowCombat(bool enable) => AiCmd($"followcombat {(enable ? "on" : "off")}", string.Empty);
 
     public static void AiFollowOutOfCombat(bool enable) => AiCmd($"followoutofcombat {(enable ? "on" : "off")}", string.Empty);
-
-    public static void AiSetMaxDistanceTarget(float dist) => AiCmd($"maxdistancetarget {dist:0.##}", string.Empty);
-
-    public static void AiSetPositional(string positional) => AiCmd($"positional {positional}", string.Empty);
 
     /// <summary>Forbid / allow AI navigation (so we can hand movement to vnavmesh and back).
     /// Reborn: "/bmrai forbidmovement on|off". Vanilla: AIConfig.ForbidMovement bool.</summary>

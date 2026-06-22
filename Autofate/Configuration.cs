@@ -70,9 +70,6 @@ public sealed class Configuration
     /// <summary>FATE names we will never navigate to, regardless of mode / enabled fate types.</summary>
     public HashSet<string> FateBlacklist = new();
 
-    // Collect fate tuning
-    public int CollectInitialTurnIn = 5;
-
     /// <summary>
     /// How long (seconds) to stay in a zone waiting for FATEs to (re)spawn before rotating to
     /// another zone. FATEs pop every few minutes, so we dwell rather than zone-hop the instant

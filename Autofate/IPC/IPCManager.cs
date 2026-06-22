@@ -187,9 +187,6 @@ public static class IPCManager
     public static bool BmrHandlesMovement(Configuration c)
         => BossModIPC.IsInstalled;
 
-    /// <summary>Is BMR installed?</summary>
-    public static bool BmrInstalled => BossModIPC.IsInstalled;
-
     /// <summary>
     /// Allow (true) or forbid (false) BMR's AI from moving us. Forbidding hands movement to vnav
     /// (used during mass-pull to chase un-aggroed adds BMR won't pursue); allowing hands it back so

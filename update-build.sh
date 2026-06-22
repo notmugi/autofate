@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Dead-simple Autofate publisher.
 #
-#   ./update-build.sh            -> clean rebuild, repackage, verify versions match (no push)
-#   ./update-build.sh bump       -> also auto-bump the 4th version digit before building
-#   ./update-build.sh push       -> rebuild, then commit + push
-#   ./update-build.sh bump push  -> bump, rebuild, commit + push  (the usual one-liner)
+#   ./update-build.sh                  -> clean rebuild, repackage, verify versions match (no push)
+#   ./update-build.sh bump             -> also auto-bump the 4th version digit before building
+#   ./update-build.sh --version X.Y.Z.W -> set an explicit version before building
+#   ./update-build.sh push             -> rebuild, then commit + push
+#   ./update-build.sh bump push        -> bump, rebuild, commit + push  (the usual one-liner)
+#   ./update-build.sh --version 2.1.0.0 push -> set version, rebuild, commit + push
 #
 # The plugin version lives in Autofate/Autofate.csproj (<Version>). Everything else
 # (latest.zip, repo.json) is synced to match it automatically.
@@ -14,13 +16,31 @@ cd "$(dirname "$0")"
 CSPROJ="Autofate/Autofate.csproj"
 DO_BUMP=false
 DO_PUSH=false
-for arg in "$@"; do
-  case "$arg" in
+SET_VERSION=""
+while [ $# -gt 0 ]; do
+  case "$1" in
     bump) DO_BUMP=true ;;
     push) DO_PUSH=true ;;
-    *) echo "Unknown arg: $arg (use 'bump' and/or 'push')" >&2; exit 1 ;;
+    --version) shift; SET_VERSION="${1:-}" ;;
+    --version=*) SET_VERSION="${1#*=}" ;;
+    *) echo "Unknown arg: $1 (use 'bump', 'push', or '--version X.Y.Z.W')" >&2; exit 1 ;;
   esac
+  shift
 done
+
+if [ -n "$SET_VERSION" ] && $DO_BUMP; then
+  echo "ERROR: use either 'bump' or '--version', not both." >&2; exit 1
+fi
+
+# Explicit version: set <Version> to exactly what was passed (must be X.Y.Z.W).
+if [ -n "$SET_VERSION" ]; then
+  if ! [[ "$SET_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "ERROR: --version must be X.Y.Z.W (e.g. 2.1.0.0), got '$SET_VERSION'." >&2; exit 1
+  fi
+  CUR=$(grep -oP '<Version>\K[^<]+' "$CSPROJ")
+  sed -i -E "s|<Version>[^<]+</Version>|<Version>${SET_VERSION}</Version>|" "$CSPROJ"
+  echo ">> Version set: $CUR -> $SET_VERSION"
+fi
 
 # Optional: bump the 4th digit of <Version> (e.g. 2.0.0.4 -> 2.0.0.5).
 if $DO_BUMP; then
