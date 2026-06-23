@@ -71,7 +71,7 @@ These are present in the code but **disabled/greyed in the UI**. These are featu
 contributions. Search the code for `TODO(WIP)` to find each one:
 
 - **Mender NPC repair**: Currently, only self-repair is automated; NPC routing is unfinished. I didnt have the time, money, or energy to implement a second form of repairs, i work a full time job and just wanted a product that is in a good working state. if you know how to get this working, that would be fantastic. an example of navigating the repair window is currently already available through self repair, and an example of setting a desired npc location is available through the bicolor shop and alternatively through the chocobo stable section.
-
+- **TODO**: i need to add a toggle that allows for occasional random jumps to be thrown in during navigation to look more human and prevent getting stuck
 ---
 ## Installing
 
