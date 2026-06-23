@@ -67,10 +67,10 @@ Collection modes (Atma/Demiatma/Luminous/Memories) track the required items in y
 
 ## WIP features
 
-These are present in the code but **disabled/greyed in the UI**. They're good first
-contributions — search the code for `TODO(WIP)` to find each one:
+These are present in the code but **disabled/greyed in the UI**. These are features that need
+contributions. Search the code for `TODO(WIP)` to find each one:
 
-- **Mender NPC repair** — only self-repair is automated; NPC routing is unfinished. I didnt have the time, money, or energy to implement a second form of repairs, i work a full time job and just wanted a product that is in a good working state. if you know how to get this working, that would be fantastic. an example of navigating the repair window is currently already available through self repair, and an example of setting a desired npc location is available through the bicolor shop and alternatively through the chocobo stable section.
+- **Mender NPC repair**: Currently, only self-repair is automated; NPC routing is unfinished. I didnt have the time, money, or energy to implement a second form of repairs, i work a full time job and just wanted a product that is in a good working state. if you know how to get this working, that would be fantastic. an example of navigating the repair window is currently already available through self repair, and an example of setting a desired npc location is available through the bicolor shop and alternatively through the chocobo stable section.
 
 ---
 ## Installing
@@ -86,15 +86,15 @@ https://raw.githubusercontent.com/notmugi/autofate/main/repo.json
 from **Plugin Installer → Dev Tools**.
 
 ### Commands
-- `/autofates`, `/autofate`, `/af` — open the window.
-- `/af start`, `/af stop`, `/af toggle` — control farming.
+- `/autofates`, `/autofate`, `/af`: open the window.
+- `/af start`, `/af stop`, `/af toggle`: control farming.
 
-## Recommended companion plugins
-- **vnavmesh** (navigation) — required.
-- **BossMod Reborn** — required (movement + AOE dodging).
-- **Wrath Combo** or **Rotation Solver Reborn** — at least one, for the rotation.
-- **Lifestream** (teleporting / housing travel).
-- **AutoRetainer** (optional). (Currently WIP)
+## Required companion plugins
+- **vnavmesh**: required for navigation.
+- **BossMod / BMR**: required for combat movement.
+- **Wrath Combo**, **Bossmod / BMR**, or **Rotation Solver Reborn**: requires at least one, for the rotation.
+- **Lifestream**: required Traveling between zones.
+- **TextAdvance** required. Spams through dialogue options and hands in collection fate items.
 
 ---
 ## Building
@@ -123,5 +123,5 @@ the script. See [SETUP.md](SETUP.md) for details and the icon/description instru
 
 ## Contributing
 
-Issues and PRs are welcome — bug reports, fixes, or finishing the WIP features above. There's no
-formal style guide; just keep it readable.
+Issues and PRs are welcome! I don't have any formal formatting necessities, just use common sense.
+any and all contributions will help make this plogon less slop and more human. :)
