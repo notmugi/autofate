@@ -601,30 +601,17 @@ public sealed unsafe class FarmingController
         var me0 = Player.Object;
         if (me0 == null) return;
 
-
-        // NPC-start fates (Collect / Escort / Defend) begin by talking to a start NPC, so head
-        // straight for that NPC instead of a random ring point. If the NPC isn't loaded yet (still
-        // far away) aim for the ring center until it resolves; arrival is "inside the ring", and
-        // TickInFate then walks the rest of the way to the NPC and drives the talk.
         var type = FateSelector.Classify(fate);
-        var npcStart = type is FateType.Collect or FateType.Escort or FateType.Defend;
         var insideRing = Vector3.Distance(me0.Position, fate.Position) <= fate.Radius;
 
-        // We navigate to the START NPC only when the fate still NEEDS starting: an Escort/Defend
-        // fate, or a Collect fate that nobody has started yet (no enemies present). If a Collect fate
-        // is ALREADY underway (enemies up), we do NOT chase the enemy here — that approached combat
-        // while still mounted/airborne AND made vnav recalc the path as the enemy moved. Instead we
-        // fall through to the combat path: drop at a random landable spot, LAND, and only then does
-        // TickInFate (grounded) walk us to an enemy to fight.
+        // NPC-start fates (Escort/Defend, or a not-yet-started Collect with no enemies): travel to
+        // the START NPC. Arrival for these is "inside the ring" — TickInFate then walks the rest of
+        // the way to the NPC and drives the talk.
         var startNpcNeeded = type is FateType.Escort or FateType.Defend
             || (type == FateType.Collect && FateTargeting.GetNearestFateEnemy(_targetFateId) == null);
         if (startNpcNeeded)
         {
-            if (insideRing)
-            {
-                ArriveAtFate(fate);
-                return;
-            }
+            if (insideRing) { ArriveAtFate(fate); return; }
             var npc = FateTargeting.FindFateStartNpc(_targetFateId, fate.Radius);
             var dest = npc?.Position ?? fate.Position;
             StatusText = $"Traveling to fate NPC: {fate.Name}";
@@ -632,21 +619,19 @@ public sealed unsafe class FarmingController
             return;
         }
 
-        // Combat fates: travel to the RANDOM LANDABLE point. ARRIVE when EITHER we reach that point
-        // OR we're already grounded inside the ring. The grounded-inside check is what kills the
-        // loop: once we're on foot inside the fate we STOP trying to nav to the point (and never
-        // start moving toward an enemy before being dismounted). ArriveAtFate stops nav first, then
-        // dismounts; it won't enter the fate until fully grounded — so only ONE thing happens.
+        // Combat fates (and Collect fates already underway): travel to a RANDOM LANDABLE interior
+        // point. ARRIVAL = inside the fate boundaries AND within ~4y of that dropoff. That decisively
+        // ends fate-travel nav, drops us, and hands off to enemy navigation (TickInFate). We do NOT
+        // arrive on inside-ring alone (that dropped us at the edge / re-navved).
         _fateDropoff ??= RandomPointInFate(fate);
-        var grounded = !Features.MountManager.IsMounted && !Features.MountManager.IsFlying;
-        if ((grounded && insideRing) || Vector3.Distance(me0.Position, _fateDropoff.Value) <= 4f)
+        if (insideRing && Vector3.Distance(me0.Position, _fateDropoff.Value) <= 4f)
         {
             ArriveAtFate(fate);
             return;
         }
 
-        // STUCK -> re-roll: if we barely move for >2s, the dropoff is unreachable; pick a new
-        // random landable point in the ring and navigate to that instead.
+        // STUCK -> re-roll (ONLY while travelling to the dropoff): if we barely move for >2s the
+        // dropoff is unreachable; pick a new random landable interior point and head there instead.
         var nowMs = Environment.TickCount64;
         if (_fateStuckLastSampleMs == 0) { _fateStuckLastSampleMs = nowMs; _fateStuckLastPos = me0.Position; }
         else if (nowMs - _fateStuckLastSampleMs >= FateStuckWindowMs)
