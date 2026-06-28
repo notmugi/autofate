@@ -109,6 +109,11 @@ public static class IPCManager
             case CombatBackend.BossModReborn: BossModIPC.EnsureActivePreset(BossModPreset.Name); break;
         }
 
+        // When Wrath isn't our rotation backend, explicitly disable it: Wrath keeps some auto-rotation
+        // features active on its own (independent of our IPC lease), which would fight our backend.
+        if (c.RotationBackend != CombatBackend.WrathCombo && WrathComboIPC.IsInstalled)
+            WrathComboIPC.Disable();
+
         // Movement is always the hybrid: turn BMR's AI on so it handles in-combat repositioning +
         // AOE dodging (vnav handles travel/approach via Navigator).
         BossModIPC.AiEnable(true);

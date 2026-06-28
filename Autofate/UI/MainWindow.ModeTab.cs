@@ -98,6 +98,10 @@ public sealed partial class MainWindow
 
     private void DrawSharedFatesMode()
     {
+        // If the in-game Shared FATE window is open, re-read it live so the tracker reflects the
+        // latest progress (the zone being farmed changes every fate; without this it shows stale).
+        Features.SharedFateTracker.CaptureIfWindowOpen();
+
         ImGui.TextWrapped("Shared FATEs are the FATEs in Shadowbringers, Endwalker, and Dawntrail "
             + "overworld zones. The plugin rotates through these zones and can use the in-game "
             + "Shared FATE tracker to skip/stop zones once their rank is maxed.");
@@ -155,13 +159,12 @@ public sealed partial class MainWindow
             .ToList();
         ImGui.TextDisabled($"{data.Count(z => z.IsMaxed)}/{data.Count} selected zones maxed.");
 
-        using (var tbl = ImRaii.Table("##sftracker", 3, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY,
+        using (var tbl = ImRaii.Table("##sftracker", 2, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY,
                    new System.Numerics.Vector2(0, 320)))
         {
             if (tbl)
             {
                 ImGui.TableSetupColumn("Zone", ImGuiTableColumnFlags.WidthStretch);
-                ImGui.TableSetupColumn("Rank", ImGuiTableColumnFlags.WidthFixed, 70);
                 ImGui.TableSetupColumn("Fates", ImGuiTableColumnFlags.WidthFixed, 70);
                 ImGui.TableHeadersRow();
                 foreach (var z in data)
@@ -173,10 +176,8 @@ public sealed partial class MainWindow
                     else
                         ImGui.TextUnformatted(z.ZoneName);
                     ImGui.TableNextColumn();
-                    ImGui.TextUnformatted($"{z.CurrentRank}/{z.MaxRank}");
-                    ImGui.TableNextColumn();
-                    // Show progress to 60 fates (MaxRank is only the current stage cap, not completion).
-                    ImGui.TextUnformatted($"{z.FateProgress}/60");
+                    // Total shared FATEs completed across all ranks; 66 = fully maxed.
+                    ImGui.TextUnformatted($"{z.Completed}/{Features.SharedFateTracker.ZoneProgress.Total}");
                 }
             }
         }

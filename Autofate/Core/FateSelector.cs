@@ -93,6 +93,9 @@ public static class FateSelector
 
     public readonly record struct Candidate(IFate Fate, FateType Type, float Distance, long TimeRemaining);
 
+    /// <summary>A fate this close (yalms) is engaged immediately, ignoring timer priority.</summary>
+    private const float PickNearbyDist = 50f;
+
     /// <summary>Returns the list of valid candidate fates in the current zone, already filtered.</summary>
     public static List<Candidate> GetCandidates(Configuration c)
     {
@@ -144,16 +147,49 @@ public static class FateSelector
         var candidates = GetCandidates(c);
         if (candidates.Count == 0) return null;
 
+        // PROXIMITY OVERRIDE: ignore the lowest-timer recommendation when a fate is right on top of
+        // us — a fate within PickNearbyDist yalms, OR one whose ring we're already standing inside,
+        // is taken immediately (nearest first). This avoids running off to a far expiring fate when
+        // there's one we could engage instantly, and makes chained replacement fates (which spawn at
+        // our current spot) get picked at once.
+        var nearby = candidates
+            .Where(x => x.Distance <= PickNearbyDist || x.Distance <= x.Fate.Radius)
+            .OrderBy(x => x.Distance)
+            .ToList();
+        if (nearby.Count > 0) return nearby[0];
+
         if (c.PrioritizeLowTimer)
         {
-            // Lowest remaining time first; fates with 0/unknown time (e.g. Preparation) go last.
+            // Timed fates: lowest remaining time first. NPC-start fates (Collect/Escort) report a
+            // 0/unknown timer until interacted with, so instead of dumping them last we interleave
+            // them by DISTANCE against the timed fates' distances: a 0-timer fate sorts as if its
+            // remaining time equalled that of the nearest timed fate it's closer than. In practice
+            // this picks a nearby NPC-start fate over a far timed one, while still grabbing an
+            // expiring timed fate that's right next to us.
+            var timed = candidates.Where(x => x.TimeRemaining > 0).OrderBy(x => x.Distance).ToList();
             return candidates
-                .OrderBy(x => x.TimeRemaining <= 0 ? long.MaxValue : x.TimeRemaining)
+                .OrderBy(x => x.TimeRemaining > 0
+                    ? x.TimeRemaining
+                    : EffectiveTimerByDistance(x, timed))
                 .ThenBy(x => x.Distance)
                 .First();
         }
 
         return candidates.OrderBy(x => x.Distance).First();
+    }
+
+    /// <summary>
+    /// Effective timer for a 0/unknown-timer (NPC-start) fate so it can be interleaved among timed
+    /// fates by distance: it takes the TimeRemaining of the nearest timed fate that is FARTHER than
+    /// it, so the 0-timer fate sorts just ahead of every timed fate it's closer than. If it's farther
+    /// than all timed fates (or there are none), it sorts last (long.MaxValue).
+    /// </summary>
+    private static long EffectiveTimerByDistance(Candidate npc, System.Collections.Generic.List<Candidate> timedByDistance)
+    {
+        foreach (var t in timedByDistance) // nearest timed first
+            if (t.Distance > npc.Distance)
+                return t.TimeRemaining; // slot just ahead of this (farther) timed fate
+        return long.MaxValue; // farther than all timed fates -> last
     }
 
     /// <summary>Find the fate the player is currently standing inside (within its radius), if any.</summary>

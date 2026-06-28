@@ -37,6 +37,7 @@ public sealed partial class MainWindow
         var useLs = C.UseLifestream;
         if (ImGui.Checkbox("Use Lifestream for teleporting between zones", ref useLs)) { C.UseLifestream = useLs; Save(); }
 
+
         ImGui.Spacing();
         var onFinish = C.LifestreamOnFinish;
         if (ImGui.Checkbox("Run a Lifestream command when farming finishes", ref onFinish)) { C.LifestreamOnFinish = onFinish; Save(); }

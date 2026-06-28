@@ -79,8 +79,9 @@ public static class TextAdvanceIPC
             EnableRewardPick = true,
             EnableCutsceneEsc = true,
             EnableCutsceneSkipConfirm = true,
-            EnableQuestAccept = true,
-            EnableQuestComplete = true,
+            // NOT QuestAccept/QuestComplete: we never accept/complete quests while fate-farming, and
+            // those flags make TextAdvance hand off to the Questionable plugin. We confirm fate-join
+            // Yes/No prompts ourselves, so we don't need them.
             // NOT AutoInteract: we target + interact with NPCs/objects ourselves.
         };
         try

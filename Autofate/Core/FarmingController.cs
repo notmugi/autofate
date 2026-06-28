@@ -61,9 +61,6 @@ public sealed unsafe class FarmingController
     // the NPC-interact fall-through fire again within the same visit.
     private bool _shoppingDone;
 
-    // Re-open the Shared FATE window to refresh data every 5 completed fates.
-    private int _fatesSinceFateDataRefresh;
-
     // The farming state we were in before diverting to gemstone shopping. When shopping completes
     // we return directly to this (fate grinding / chocobo loop) instead of routing back through the
     // maintenance check, which would otherwise immediately re-enter the shop.
@@ -76,6 +73,9 @@ public sealed unsafe class FarmingController
     private long _lastFateSeenMs;
     private uint _dwellZone;
 
+    // Re-open the Shared FATE window to refresh data every 5 completed fates.
+    private int _fatesSinceFateDataRefresh;
+
     // Collect-fate hand-in: we hand in fixed batches (DWD/BMR-style) rather than trying to "learn"
     // the per-item progress value, which was fragile and never calibrated. Hold until we have a
     // full batch, hand it in, repeat until the fate hits 100% (or runs dry of ground items).
@@ -85,6 +85,22 @@ public sealed unsafe class FarmingController
     // not every tick). During collect HandIn/Pickup we STOP the backend so it doesn't fight us for
     // the target — that target tug-of-war was the "flicks between the NPC and an enemy" bug.
     private bool _combatBackendActive;
+
+    // Fate-travel stuck detection: if we barely move for >2s while traveling to the fate dropoff,
+    // the spot is unreachable -> re-roll a NEW random LANDABLE point in the ring and go to that.
+    private System.Numerics.Vector3 _fateStuckLastPos;
+    private long _fateStuckLastSampleMs;
+    private const long FateStuckWindowMs = 2000;
+    private const float FateStuckMinMove = 2f;
+
+    // Grounded-stuck escape: while on foot and navigating, if we move < GroundStuckMinMove over
+    // GroundStuckWindowMs we're wedged on geometry. Back straight out ~5y, then regenerate the path.
+    private System.Numerics.Vector3 _groundStuckLastPos;
+    private long _groundStuckLastMs;
+    private System.Numerics.Vector3? _groundNudgeTarget; // back-out point we're driving to
+    private long _groundNudgeUntilMs;                    // safety timeout for the nudge
+    private const long GroundStuckWindowMs = 2000;
+    private const float GroundStuckMinMove = 2f;
     private void SetCombatBackend(bool active)
     {
         if (_combatBackendActive == active) return;
@@ -92,6 +108,7 @@ public sealed unsafe class FarmingController
         if (active) IPCManager.StartCombat(C);
         else IPCManager.StopCombat(C);
     }
+
 
     // Smart-mix yield latch: when BMR takes over for a dodge we keep yielding until danger has
     // been fully clear for this settle window, so vnav and BMR don't fight for control.
@@ -204,9 +221,11 @@ public sealed unsafe class FarmingController
         // RefreshData(force) invalidation in Start), caches the data, then spam-closes it.
         if (C.Mode == FarmingMode.SharedFates)
         {
-            // EnsureData opens the window once, caches the data, then spam-closes it. We only
-            // re-open (invalidate the cache) every 5 completed fates in OnFateFinished.
+            // EnsureData opens the window once, caches the data, then spam-closes it.
             Features.SharedFateTracker.EnsureData();
+            // If the window is open (ours or the user's), re-read live so the zone we're actively
+            // progressing updates instead of showing a stale cached value.
+            Features.SharedFateTracker.CaptureIfWindowOpen();
         }
 
         // SYNC ASAP: if we're physically standing inside a running fate and not yet level-synced,
@@ -218,12 +237,15 @@ public sealed unsafe class FarmingController
         // beating on us or our chocobo, drop into ClearingAggro to deal with it first. Checked
         // continuously (not just at fate-end) since aggro can land at any time.
         if ((State == FarmState.SelectingFate || State == FarmState.TravelingToFate
-             || State == FarmState.SelectingZone)
-            && FateTargeting.GetEnemiesAttackingMe().Count > 0)
+             || State == FarmState.SelectingZone || State == FarmState.TravelingToZone)
+            && (InCombat() || FateTargeting.GetEnemiesAttackingMe().Count > 0))
         {
             Navigator.Stop();
             State = FarmState.ClearingAggro;
         }
+
+        // Grounded-stuck escape (back out + regenerate) — consumes the tick if active.
+        if (TickGroundedStuck()) return;
 
         // FOLLOW-LEADER: skip the whole zone-select/travel state machine. We don't pick or path to
         // our own fates — just follow the leader wherever they go and run whatever fate we land in.
@@ -549,6 +571,16 @@ public sealed unsafe class FarmingController
         // We have a live FATE here — refresh the dwell timer.
         _lastFateSeenMs = now;
 
+        // POST-COMPLETION GRACE: if we just finished a fate, hold briefly before committing to a
+        // FAR fate so a chained replacement spawning at/near our spot can be picked instead. A
+        // nearby fate (likely the replacement) is taken immediately.
+        if (now < _postFateGraceUntilMs && best.Value.Distance > PostFateNearbyDist)
+        {
+            StatusText = "Waiting for a possible replacement FATE...";
+            return;
+        }
+        _postFateGraceUntilMs = 0; // committing now -> clear the grace window
+
         _targetFateId = best.Value.Fate.FateId;
         _startedFateId = 0; // new fate -> allow the start-NPC talk again
         _fateNpcInteractedMs = 0; // clear the post-interact hold for the new fate
@@ -567,42 +599,130 @@ public sealed unsafe class FarmingController
         }
 
         var me0 = Player.Object;
-        var distToCenter = me0 == null ? float.MaxValue : Vector3.Distance(me0.Position, fate.Position);
+        if (me0 == null) return;
 
-        // Drop into the CENTER of the fate, not the edge. We consider ourselves "arrived" only when
-        // we're near the center (or as close as navmesh can get us). ArrivalRange is small so the
-        // combat backend engages from the middle of the pack.
-        const float arrivalRange = 4f;
-        if (distToCenter <= arrivalRange)
+
+        // NPC-start fates (Collect / Escort / Defend) begin by talking to a start NPC, so head
+        // straight for that NPC instead of a random ring point. If the NPC isn't loaded yet (still
+        // far away) aim for the ring center until it resolves; arrival is "inside the ring", and
+        // TickInFate then walks the rest of the way to the NPC and drives the talk.
+        var type = FateSelector.Classify(fate);
+        var npcStart = type is FateType.Collect or FateType.Escort or FateType.Defend;
+        var insideRing = Vector3.Distance(me0.Position, fate.Position) <= fate.Radius;
+
+        // We navigate to the START NPC only when the fate still NEEDS starting: an Escort/Defend
+        // fate, or a Collect fate that nobody has started yet (no enemies present). If a Collect fate
+        // is ALREADY underway (enemies up), we do NOT chase the enemy here — that approached combat
+        // while still mounted/airborne AND made vnav recalc the path as the enemy moved. Instead we
+        // fall through to the combat path: drop at a random landable spot, LAND, and only then does
+        // TickInFate (grounded) walk us to an enemy to fight.
+        var startNpcNeeded = type is FateType.Escort or FateType.Defend
+            || (type == FateType.Collect && FateTargeting.GetNearestFateEnemy(_targetFateId) == null);
+        if (startNpcNeeded)
         {
-            Navigator.Stop();
-
-            // Dismount before fighting — mounted/flying blocks the combat backend from engaging.
-            if (Features.MountManager.IsMounted)
+            if (insideRing)
             {
-                StatusText = $"Arrived at fate: {fate.Name} (dismounting)";
-                Features.MountManager.Dismount();
-                return; // re-check next tick; once dismounted we proceed below
+                ArriveAtFate(fate);
+                return;
             }
-
-            // Sync once we're actually inside (avoids syncing to pass-through fates).
-            if (C.AutoLevelSync) SyncToFate();
-
-            Stats.OnFateAttempted();
-            Features.ChocoboManager.SampleXpAtFateStart(); // for empirical XP-stall (rank-cap) detection
-            SetCombatBackend(true); // (re)engage now that we're grounded inside the fate
-            State = FarmState.InFate;
+            var npc = FateTargeting.FindFateStartNpc(_targetFateId, fate.Radius);
+            var dest = npc?.Position ?? fate.Position;
+            StatusText = $"Traveling to fate NPC: {fate.Name}";
+            Navigator.MoveTo(C, dest, 3.5f, allowMount: true);
             return;
         }
 
-        // Navigate to the fate CENTER (closest valid spot navmesh can reach). Allow mount/flight
-        // only while still outside the ring; once inside, walk the rest so we don't re-mount for the
-        // short hop to center (which would cause a mount/dismount loop).
+        // Combat fates: travel to the RANDOM LANDABLE point. ARRIVE when EITHER we reach that point
+        // OR we're already grounded inside the ring. The grounded-inside check is what kills the
+        // loop: once we're on foot inside the fate we STOP trying to nav to the point (and never
+        // start moving toward an enemy before being dismounted). ArriveAtFate stops nav first, then
+        // dismounts; it won't enter the fate until fully grounded — so only ONE thing happens.
+        _fateDropoff ??= RandomPointInFate(fate);
+        var grounded = !Features.MountManager.IsMounted && !Features.MountManager.IsFlying;
+        if ((grounded && insideRing) || Vector3.Distance(me0.Position, _fateDropoff.Value) <= 4f)
+        {
+            ArriveAtFate(fate);
+            return;
+        }
+
+        // STUCK -> re-roll: if we barely move for >2s, the dropoff is unreachable; pick a new
+        // random landable point in the ring and navigate to that instead.
+        var nowMs = Environment.TickCount64;
+        if (_fateStuckLastSampleMs == 0) { _fateStuckLastSampleMs = nowMs; _fateStuckLastPos = me0.Position; }
+        else if (nowMs - _fateStuckLastSampleMs >= FateStuckWindowMs)
+        {
+            if (Vector3.Distance(me0.Position, _fateStuckLastPos) < FateStuckMinMove)
+            {
+                Navigator.Stop();
+                _fateDropoff = RandomPointInFate(fate);
+                Diag("Movement", "fatestuck", $"stuck >{FateStuckWindowMs}ms -> new random dropoff {_fateDropoff}");
+            }
+            _fateStuckLastSampleMs = nowMs;
+            _fateStuckLastPos = me0.Position;
+        }
+
         StatusText = $"Traveling to fate: {fate.Name}";
-        var insideRing = distToCenter <= fate.Radius;
-        Navigator.MoveTo(C, fate.Position, arrivalRange, allowMount: !insideRing);
+        Navigator.MoveTo(C, _fateDropoff.Value, 4f, allowMount: true);
     }
 
+    /// <summary>
+    /// We're at our dropoff (inside the ring / reached the random point). Dismount, then sync +
+    /// engage. If we've been here &gt;5s and are STILL mounted, vnav has likely wedged on an
+    /// unreachable spot, so pick a NEW random interior point and renav to break the stall.
+    /// </summary>
+    private void ArriveAtFate(IFate fate)
+    {
+        // STOP navigating the instant we're considered arrived — never re-path inside the ring (that
+        // re-nav was the land<->navigate loop). Then just dismount; once grounded, start the fate.
+        Navigator.Stop();
+
+        if (Features.MountManager.IsMounted || Features.MountManager.IsFlying)
+        {
+            StatusText = $"Arrived at fate: {fate.Name} (dismounting)";
+            Features.MountManager.Dismount(); // throttled internally; re-checked next tick
+            return;
+        }
+
+        // Grounded -> begin the fate.
+        if (C.AutoLevelSync) SyncToFate();
+        Stats.OnFateAttempted();
+        Features.ChocoboManager.SampleXpAtFateStart();
+        SetCombatBackend(true);
+        State = FarmState.InFate;
+    }
+
+    private static readonly Random _fateRng = new();
+
+    /// <summary>A random point inside the fate ring (within ~75% of the radius so we stay
+    /// comfortably inside). Used as the dropoff target instead of the (often-unreachable) center.</summary>
+    private static Vector3 RandomPointInFate(IFate fate)
+    {
+        // Pick a random X/Z inside the ring and resolve the ACTUAL landable floor there. We do NOT
+        // keep the ring-center Y: on sloped/multi-level terrain that height is wrong for the chosen
+        // X/Z and is exactly what made us aim into the floor. SnapToFloor searches downward from high
+        // above and returns a LANDABLE point only, so every candidate is a real spot we can stand on.
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            var r = fate.Radius * 0.75f * MathF.Sqrt((float)_fateRng.NextDouble());
+            var theta = (float)(_fateRng.NextDouble() * Math.PI * 2);
+            var xz = new Vector3(fate.Position.X + r * MathF.Cos(theta), fate.Position.Y,
+                                 fate.Position.Z + r * MathF.Sin(theta));
+
+            if (SnapLandable(xz) is { } pt
+                && Vector3.Distance(new Vector3(pt.X, 0, pt.Z),
+                                    new Vector3(fate.Position.X, 0, fate.Position.Z)) <= fate.Radius)
+                return pt;
+        }
+
+        // Nothing landable sampled -> snap the ring centre to the floor (or use it as-is).
+        return SnapLandable(fate.Position) ?? fate.Position;
+    }
+
+    /// <summary>Project a point onto a LANDABLE navmesh floor. Searches downward from well above so
+    /// we hit the top surface, and NEVER accepts an unlandable poly (so we never drop somewhere we
+    /// can't stand). Returns null if no landable floor is found.</summary>
+    private static Vector3? SnapLandable(Vector3 p)
+        => Autofate.IPC.NavmeshIPC.PointOnFloor(new Vector3(p.X, p.Y + 50f, p.Z), false, 5f);
     private bool IsInsideFate(IFate fate)
     {
         var me = Player.Object;
@@ -625,7 +745,13 @@ public sealed unsafe class FarmingController
     private ulong _collectInteractObjId;
     private const long CollectInteractCooldownMs = 2000;
     private ushort _startedFateId; // fate we've already done the start-NPC talk for (don't repeat)
-    private long _fateStartConfirmedMs; // when we clicked Yes to start a fate (escort follow waits ~3s after)
+    private long _fateStartConfirmedMs;
+    // After a FATE completes, MANY fates immediately spawn a chained replacement at (or near) the
+    // same spot. Don't instantly commit to navigating off to a far fate — hold briefly so a nearby
+    // replacement can spawn and be picked (it'll be the closest). A nearby fate is taken at once.
+    private long _postFateGraceUntilMs;
+    private const long PostFateGraceMs = 5000;     // how long to wait for a replacement after a clear
+    private const float PostFateNearbyDist = 50f;  // a fate within this range is taken immediately (no grace wait)
     private ulong _escortNpcId; // cached escort NPC object id (FateId can flicker to 0 mid-fate)
     private bool _escortChasing; // hysteresis: are we currently chasing the escort NPC?
     // ESCORT detection by RING MOVEMENT: an escort fate's ring (fate.Position) MOVES as the escorted
@@ -635,6 +761,7 @@ public sealed unsafe class FarmingController
     private Vector3 _fateInitialPos; // first-seen ring center for the current fate
     private bool _fatePosSampled;    // have we sampled _fateInitialPos yet?
     private bool _ringMovedFollow;   // ring has moved enough -> treat as follow fate (latched)
+    private Vector3? _fateDropoff;   // randomized dropoff spot inside the current fate ring
     private const float RingMoveFollowThreshold = 8f; // yalms of ring drift to call it an escort
     private long _dismountedForNpcMs; // when we dismounted to talk to a fate NPC (settle delay)
 
@@ -654,37 +781,30 @@ public sealed unsafe class FarmingController
         var talkOpen = ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>(
                 "Talk", out var talk) && ECommons.GenericHelpers.IsAddonReady(talk);
 
-        if (TextAdvanceIPC.ControlActive)
+        // ALWAYS click the fate-start Yes/No ourselves. TextAdvance does NOT confirm this box — it's
+        // a generic FATE-start level-warning prompt ("Get stabbed? — recommended level 94"), the same
+        // class of arbitrary Yes/No TA ignores (like the gemstone-exchange box). If we deferred it to
+        // TA it would sit open forever. Gate on IsAddonReady (NOT just IsVisible): during the
+        // open/close animation the addon is visible but its YesButton pointer is still null (NREs).
+        if (yesOpen)
         {
-            if (yesOpen)
-                _fateStartConfirmedMs = Environment.TickCount64; // TA confirms it; fate activates ~3s later
-            if (yesOpen || talkOpen)
-                return true; // let TextAdvance drive the dialogue; just hold
+            if (EzThrottler.Throttle("AF_FateYes", 600))
+            {
+                try { new ECommons.UIHelpers.AddonMasterImplementations.AddonMaster.SelectYesno((nint)yn).Yes(); }
+                catch (Exception e) { Svc.Log.Verbose($"[Controller] FateYes failed (addon mid-transition): {e.Message}"); }
+                _fateStartConfirmedMs = Environment.TickCount64; // fate activates ~3s after this
+            }
+            return true;
         }
-        else
+        // Talk window: let TextAdvance advance it when it holds control; otherwise click it ourselves.
+        if (talkOpen)
         {
-            // FALLBACK (no TextAdvance): drive the dialogue ourselves.
-            // Gate on IsAddonReady (NOT just IsVisible): during the open/close animation the addon
-            // is visible but its YesButton pointer is still null, which NRE'd inside SelectYesno.Yes.
-            if (yesOpen)
+            if (!TextAdvanceIPC.ControlActive && EzThrottler.Throttle("AF_FateTalk", 250))
             {
-                if (EzThrottler.Throttle("AF_FateYes", 600))
-                {
-                    try { new ECommons.UIHelpers.AddonMasterImplementations.AddonMaster.SelectYesno((nint)yn).Yes(); }
-                    catch (Exception e) { Svc.Log.Verbose($"[Controller] FateYes failed (addon mid-transition): {e.Message}"); }
-                    _fateStartConfirmedMs = Environment.TickCount64; // fate activates ~3s after this
-                }
-                return true;
+                try { new ECommons.UIHelpers.AddonMasterImplementations.AddonMaster.Talk((nint)talk).Click(); }
+                catch (Exception e) { Svc.Log.Verbose($"[Controller] FateTalk failed (addon mid-transition): {e.Message}"); }
             }
-            if (talkOpen)
-            {
-                if (EzThrottler.Throttle("AF_FateTalk", 250))
-                {
-                    try { new ECommons.UIHelpers.AddonMasterImplementations.AddonMaster.Talk((nint)talk).Click(); }
-                    catch (Exception e) { Svc.Log.Verbose($"[Controller] FateTalk failed (addon mid-transition): {e.Message}"); }
-                }
-                return true;
-            }
+            return true;
         }
 
         Diag("NPC", "dialogue", $"yesOpen={yesOpen} talkOpen={talkOpen} taControl={TextAdvanceIPC.ControlActive}");
@@ -843,9 +963,16 @@ public sealed unsafe class FarmingController
             return;
         }
 
-        // Keep ourselves inside the fate ring if we've drifted out. Don't do this when the combat
-        // backend (BMR AI) is driving movement, and never re-mount for these short hops.
-        if (!BmrMovementActive() && !IsInsideFate(fate) && !ECommons.GenericHelpers.IsOccupied())
+        // ENEMY NAV HAS ABSOLUTE PRIORITY once inside a fate. If there's any fate enemy to fight
+        // (a fresh nearest one OR our sticky engaged target), DO NOT re-center to the ring point —
+        // EnsureCombatEngaged owns all movement and walks us to the enemy, however far. Re-centering
+        // here is what rubber-banded us back to the middle mid-chase. We only re-center to find
+        // action when there is genuinely nothing to fight.
+        var hasFateEnemy = FateTargeting.GetNearestFateEnemy(_targetFateId) != null
+            || (_engagedTargetId != 0
+                && Svc.Objects.SearchById(_engagedTargetId) is IBattleNpc eng
+                && FateTargeting.IsFateEnemy(eng, _targetFateId));
+        if (!BmrMovementActive() && !hasFateEnemy && !IsInsideFate(fate) && !ECommons.GenericHelpers.IsOccupied())
             Navigator.MoveTo(C, fate.Position, Math.Max(2f, fate.Radius * 0.6f), allowMount: false);
 
         // ESCORT DETECTION by RING MOVEMENT. An escort/follow fate's ring center (fate.Position)
@@ -1100,26 +1227,37 @@ public sealed unsafe class FarmingController
         if (fate.Progress >= 100) return CollectGoal.None;
         if (collectItemId == 0) return CollectGoal.None;
 
-        // HAND IN once we hold a full batch (DWD: inventory >= 10). Also hand in a partial batch when
-        // there are no more ground items to collect, so we don't sit on items forever.
         var moreItemsOnGround = FateTargeting.GetNearestCollectable(_targetFateId) != null;
-        if (have >= CollectBatchSize || (have > 0 && !moreItemsOnGround))
+
+        // HAND IN a FULL batch first (efficient, contributes to the shared bar).
+        if (have >= CollectBatchSize)
             return CollectGoal.HandIn;
 
-        // FIGHT only if something is actually beating on us — clear it before gathering (DWD picks up
-        // only while NOT in combat). We do NOT proactively hunt mobs in a collect fate.
-        if (InCombat() && FateTargeting.GetEnemiesAttackingMe().Count > 0)
+        // FIGHT if there are enemies in OUR fate. Others may have already started it and the enemies
+        // ARE the work (they drop the collectables) — going to fight them beats trekking to the start
+        // NPC or idling. Also covers being kept in combat. FateId-scoped: never foreign-fate mobs.
+        if (FateTargeting.GetNearestFateEnemy(_targetFateId) != null || InCombat())
             return CollectGoal.Fight;
 
-        // PICK UP the nearest ground collectable (only while out of combat, like DWD).
-        if (!InCombat() && moreItemsOnGround)
+        // PICK UP the nearest ground collectable (no enemies around).
+        if (moreItemsOnGround)
             return CollectGoal.Pickup;
+
+        // Nothing left to fight or grab but we still hold items -> hand in the partial batch.
+        if (have > 0)
+            return CollectGoal.HandIn;
 
         return CollectGoal.None;
     }
 
     private unsafe void HandleCollectFate(IFate fate)
     {
+        // SHARED GOAL: collect fates progress for EVERYONE — anyone turning in items advances the
+        // same bar. This method runs every tick, so re-check completion FIRST: the moment progress
+        // hits 100 (whether from us or other players) stop and leave instead of doing more work.
+        // OnFateFinished routes through ClearingAggro if we're still in combat.
+        if (fate.Progress >= 100) { OnFateFinished(); return; }
+
         var collectItemId = FateSelector.GetCollectItemId(fate);
         var have = collectItemId != 0 ? InventoryUtil.GetItemCount(collectItemId) : 0;
 
@@ -1467,6 +1605,10 @@ public sealed unsafe class FarmingController
         _yieldUntilMs = 0;
         _fatePosSampled = false;
         _ringMovedFollow = false;
+        _fateDropoff = null;
+        _fateStuckLastSampleMs = 0;
+        _groundStuckLastMs = 0;
+        _groundNudgeTarget = null;
     }
 
     private void OnFateFinished()
@@ -1507,6 +1649,7 @@ public sealed unsafe class FarmingController
         _startedFateId = 0;
         _fateNpcInteractedMs = 0;
         _fateStartConfirmedMs = 0;
+        _postFateGraceUntilMs = Environment.TickCount64 + PostFateGraceMs; // wait for a chained spawn
         ResetPerFateState();
         _dismountedForNpcMs = 0;
         // Escort may have forbidden BMR movement — hand it back so the next fate behaves normally.
@@ -1532,6 +1675,59 @@ public sealed unsafe class FarmingController
     }
 
     /// <summary>Kill any stray hostiles until we're out of combat, then resume fate selection.</summary>
+    /// <summary>
+    /// While grounded + navigating, if we barely move for >2s we're blocked by geometry. Back out
+    /// ~5y (opposite our facing), then force the path to regenerate. Returns true if it consumed the
+    /// tick (caller must return so nothing else issues movement this frame).
+    /// </summary>
+    private bool TickGroundedStuck()
+    {
+        var me = Player.Object;
+        if (me == null) return false;
+
+        // Drive an in-progress back-out nudge to completion before anything else moves us.
+        if (_groundNudgeTarget is { } back)
+        {
+            if (Vector3.Distance(me.Position, back) <= 2f || Environment.TickCount64 >= _groundNudgeUntilMs)
+            {
+                _groundNudgeTarget = null;
+                Navigator.Stop();                 // clears last dest -> next MoveTo regenerates the path
+                _groundStuckLastMs = 0;           // restart the stuck sampler
+                return true;
+            }
+            Autofate.IPC.NavmeshIPC.MoveTo(new List<Vector3> { back }, false);
+            StatusText = "Unblocking (backing out)";
+            return true;
+        }
+
+        // Only watch when we're actually walking on foot.
+        if (!Navigator.IsNavigating || Features.MountManager.IsMounted
+            || Features.MountManager.IsFlying || Player.IsJumping)
+        {
+            _groundStuckLastMs = 0;
+            return false;
+        }
+
+        var now = Environment.TickCount64;
+        if (_groundStuckLastMs == 0) { _groundStuckLastMs = now; _groundStuckLastPos = me.Position; return false; }
+        if (now - _groundStuckLastMs < GroundStuckWindowMs) return false;
+
+        var moved = Vector3.Distance(me.Position, _groundStuckLastPos);
+        _groundStuckLastMs = now;
+        _groundStuckLastPos = me.Position;
+        if (moved >= GroundStuckMinMove) return false; // moving fine
+
+        // Wedged -> back straight out ~5y (FFXIV yaw: forward = (sin,0,cos)).
+        var rot = me.Rotation;
+        var behind = new Vector3(-MathF.Sin(rot), 0f, -MathF.Cos(rot)) * 5f;
+        _groundNudgeTarget = me.Position + behind;
+        _groundNudgeUntilMs = now + 2000;
+        Navigator.Stop();
+        Autofate.IPC.NavmeshIPC.MoveTo(new List<Vector3> { _groundNudgeTarget.Value }, false);
+        Diag("Movement", "groundstuck", $"moved {moved:F1}y in {GroundStuckWindowMs}ms -> backing out 5y then repath");
+        return true;
+    }
+
     private void TickClearingAggro()
     {
         // GROUNDED GUARD: land + dismount before targeting/engaging stray aggro.
@@ -1543,11 +1739,11 @@ public sealed unsafe class FarmingController
             return;
         }
 
-        // Primary: enemies targeting us OR our chocobo. Secondary: anything hostile while still
-        // flagged in combat. Done when both are clear.
+        // ONLY fight enemies ACTUALLY attacking us (or our chocobo). Never target a non-fate enemy
+        // that isn't aggro'd on us - no GetNearestHostile fallback. If nothing is on us, we're done,
+        // even if the in-combat flag is still lingering.
         var attackers = FateTargeting.GetEnemiesAttackingMe();
-        var hostile = attackers.Count > 0 ? attackers[0]
-                    : (InCombat() ? FateTargeting.GetNearestHostile() : null);
+        var hostile = attackers.Count > 0 ? attackers[0] : null;
 
         Diag("Combat", "clearaggro", $"attackers={attackers.Count} hostile={(hostile?.Name.ToString() ?? "<null>")} inCombat={InCombat()}");
 

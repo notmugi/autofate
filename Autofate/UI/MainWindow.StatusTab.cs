@@ -51,7 +51,6 @@ public sealed partial class MainWindow
         DrawDetect("Wrath Combo", IPC.WrathComboIPC.IsInstalled);
         DrawDetect("Rotation Solver Reborn", IPC.RotationSolverIPC.IsInstalled);
         DrawDetect("TextAdvance", IPC.TextAdvanceIPC.IsInstalled);
-        DrawDetect("AutoRetainer", IPC.AutoRetainerIPC.IsInstalled);
 
         ImGui.Separator();
         var verbose = C.VerboseLogging;

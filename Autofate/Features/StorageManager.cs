@@ -10,9 +10,8 @@ namespace Autofate.Features;
 ///  - The chocobo saddlebag is always readable/writable while not in combat; we can move items
 ///    to/from it directly via InventoryManager.MoveItemSlot once the saddlebag is "open" (the
 ///    game requires the saddlebag UI to have been opened at least once this session).
-///  - Retainer item access requires the retainer bell interaction and is best delegated to
-///    AutoRetainer. We detect AutoRetainer (see <see cref="Autofate.IPC.AutoRetainerIPC"/>) and
-///    avoid running while it is busy. Full automated retainer withdrawal is a follow-up item.
+///  - Retainer item access requires the retainer bell interaction and is not automated; items in
+///    retainers must be withdrawn manually.
 /// </summary>
 public static unsafe class StorageManager
 {
@@ -126,7 +125,7 @@ public static unsafe class StorageManager
             have = InventoryUtil.GetItemCount(itemId);
         }
 
-        // Retainer pull is delegated to AutoRetainer / manual for now.
+        // Retainer pull is manual (not automated).
         return have;
     }
 }

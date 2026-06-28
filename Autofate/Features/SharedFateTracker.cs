@@ -3,6 +3,7 @@ using ECommons.Throttlers;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using FFXIVClientStructs.FFXIV.Component.GUI;
+using Lumina.Excel.Sheets;
 
 namespace Autofate.Features;
 
@@ -17,17 +18,13 @@ namespace Autofate.Features;
 /// </summary>
 public static unsafe class SharedFateTracker
 {
-    public readonly record struct ZoneProgress(
-        uint TerritoryId, string ZoneName, int CurrentRank, int MaxRank,
-        int FateProgress, int NeededFates)
+    public readonly record struct ZoneProgress(uint TerritoryId, string ZoneName, int Completed)
     {
-        /// <summary>
-        /// This zone is COMPLETE for shared-fate farming: 60 shared FATEs done. The agent's MaxRank
-        /// is only the CURRENT stage's cap (so rank-based "maxed" falsely triggers mid-progress,
-        /// e.g. Rak'tika showing maxed early). The real cap is 60 completed fates (the 6 to unlock
-        /// the zone in the list aren't counted in FateProgress), so we key off FateProgress >= 60.
-        /// </summary>
-        public bool IsMaxed => FateProgress >= 60;
+        /// <summary>Shared FATEs to fully max any zone. Always 66 (ShB/EW: 6+60; DT: 6+20+40).</summary>
+        public const int Total = 66;
+
+        /// <summary>Zone is fully done: all 66 shared FATEs completed.</summary>
+        public bool IsMaxed => Completed >= Total;
     }
 
     private static AgentFateProgress* Agent => AgentFateProgress.Instance();
@@ -100,6 +97,19 @@ public static unsafe class SharedFateTracker
     private static bool AddonVisible()
         => ECommons.GenericHelpers.TryGetAddonByName<AtkUnitBase>(AddonName, out var a) && a != null && a->IsVisible;
 
+    /// <summary>
+    /// If the Shared FATE window is open RIGHT NOW (opened by us or by the user), re-read the live
+    /// agent into the cache. This is what keeps the displayed values fresh: the zone you're actively
+    /// progressing changes every fate, and without a live re-read while the window is up the cache
+    /// would show a stale value (e.g. a DT zone "stuck" at its last captured number). Cheap + safe to
+    /// call every tick / every UI frame.
+    /// </summary>
+    public static void CaptureIfWindowOpen()
+    {
+        if (AddonVisible() && AgentHasData())
+            CaptureFromAgent();
+    }
+
     /// <summary>Does the live agent currently expose readable tab/zone data?</summary>
     private static bool AgentHasData()
     {
@@ -122,9 +132,11 @@ public static unsafe class SharedFateTracker
                 foreach (ref var z in tab.Zones)
                 {
                     if (z.TerritoryTypeId == 0) continue;
+                    var exVersion = Svc.Data.GetExcelSheet<TerritoryType>()?
+                        .GetRowOrDefault(z.TerritoryTypeId)?.ExVersion.RowId ?? 0;
                     _cache.Add(new ZoneProgress(
                         z.TerritoryTypeId, z.ZoneName.ToString(),
-                        z.CurrentRank, z.MaxRank, z.FateProgress, z.NeededFates));
+                        CompletedFates(exVersion == 5, z.CurrentRank, z.FateProgress)));
                 }
             }
             if (_cache.Count > 0)
@@ -161,6 +173,27 @@ public static unsafe class SharedFateTracker
                 ->GetUIModule()->ExecuteMainCommand(84);
         }
         catch (Exception e) { Svc.Log.Verbose($"[SharedFate] ExecuteMainCommand(84) failed: {e.Message}"); }
+    }
+
+    /// <summary>
+    /// Total shared FATEs completed in a zone. The agent only exposes progress WITHIN the current
+    /// rank (FateProgress) plus CurrentRank - there is no direct total - so we add the fates needed
+    /// to clear all prior ranks. Caps differ by expansion but always sum to 66:
+    ///   ShB/EW (max rank 3): R1->R2 = 6, R2->R3 = 60
+    ///   DT     (max rank 4): R1->R2 = 6, R2->R3 = 20, R3->R4 = 40
+    /// MaxRank is never read (its agent offset is unreliable); CurrentRank + FateProgress are accurate.
+    /// </summary>
+    private static int CompletedFates(bool isDawntrail, int currentRank, int progressInRank)
+    {
+        if (isDawntrail)
+        {
+            if (currentRank >= 4) return ZoneProgress.Total;
+            int[] prior = { 0, 0, 6, 26 };
+            return prior[Math.Clamp(currentRank, 1, 3)] + progressInRank;
+        }
+        if (currentRank >= 3) return ZoneProgress.Total;
+        int[] priorSe = { 0, 0, 6 };
+        return priorSe[Math.Clamp(currentRank, 1, 2)] + progressInRank;
     }
 
     /// <summary>Read all cached zones across all expansion tabs.</summary>
