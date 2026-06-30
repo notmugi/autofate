@@ -644,10 +644,18 @@ public sealed unsafe class FarmingController
             return;
         }
 
-        // STUCK -> re-roll (ONLY while travelling to the dropoff): if we barely move for >2s the
-        // dropoff is unreachable; pick a new random landable interior point and head there instead.
+        // STUCK -> re-roll: if we barely move for >2s the dropoff is unreachable; pick a new random
+        // landable interior point and head there instead. ONLY while genuinely EN ROUTE — never once
+        // we're near the dropoff. During the final descent/landing our HORIZONTAL movement is tiny
+        // (we're dropping vertically + decelerating), which read as "stuck" and re-rolled the point
+        // right before we landed. Suppress the check when we're already close to the dropoff.
         var nowMs = Environment.TickCount64;
-        if (_fateStuckLastSampleMs == 0) { _fateStuckLastSampleMs = nowMs; _fateStuckLastPos = me0.Position; }
+        var nearDropoff = Vector3.Distance(me0.Position, _fateDropoff.Value) <= 8f;
+        if (nearDropoff)
+        {
+            _fateStuckLastSampleMs = 0; // reset the sampler; we're landing, not stuck
+        }
+        else if (_fateStuckLastSampleMs == 0) { _fateStuckLastSampleMs = nowMs; _fateStuckLastPos = me0.Position; }
         else if (nowMs - _fateStuckLastSampleMs >= FateStuckWindowMs)
         {
             if (Vector3.Distance(me0.Position, _fateStuckLastPos) < FateStuckMinMove)
