@@ -97,6 +97,11 @@ public sealed unsafe class FarmingController
     // GroundStuckWindowMs we're wedged on geometry. Back straight out ~5y, then regenerate the path.
     private System.Numerics.Vector3 _groundStuckLastPos;
     private long _groundStuckLastMs;
+    // Jump phase that runs BEFORE backing out: jump, wait for grounded, jump again, then wait the
+    // SAME window; only if still not moved do we fall through to back-out + renav.
+    private int _groundJumpPhase;                 // 0=idle, 1=did first jump (await grounded), 2=did second jump (await window)
+    private System.Numerics.Vector3 _groundJumpStartPos;
+    private long _groundJumpWaitUntilMs;
     private System.Numerics.Vector3? _groundNudgeTarget; // back-out point we're driving to
     private long _groundNudgeUntilMs;                    // safety timeout for the nudge
     private const long GroundStuckWindowMs = 2000;
@@ -1593,6 +1598,7 @@ public sealed unsafe class FarmingController
         _fateDropoff = null;
         _fateStuckLastSampleMs = 0;
         _groundStuckLastMs = 0;
+        _groundJumpPhase = 0;
         _groundNudgeTarget = null;
     }
 
@@ -1678,6 +1684,7 @@ public sealed unsafe class FarmingController
                 _groundNudgeTarget = null;
                 Navigator.Stop();                 // clears last dest -> next MoveTo regenerates the path
                 _groundStuckLastMs = 0;           // restart the stuck sampler
+                _groundJumpPhase = 0;
                 return true;
             }
             Autofate.IPC.NavmeshIPC.MoveTo(new List<Vector3> { back }, false);
@@ -1700,16 +1707,51 @@ public sealed unsafe class FarmingController
         var moved = Vector3.Distance(me.Position, _groundStuckLastPos);
         _groundStuckLastMs = now;
         _groundStuckLastPos = me.Position;
-        if (moved >= GroundStuckMinMove) return false; // moving fine
+        if (moved >= GroundStuckMinMove) { _groundJumpPhase = 0; return false; } // moving fine
 
-        // Wedged -> back straight out ~5y (FFXIV yaw: forward = (sin,0,cos)).
+        // JUMP PHASE FIRST: jump, wait for grounded, jump again, wait the SAME window. Only if we
+        // STILL haven't moved after that do we back out + renav. A single hop often clears a small
+        // lip/step without the heavier back-out maneuver.
+        unsafe void Jump() => FFXIVClientStructs.FFXIV.Client.Game.ActionManager.Instance()
+            ->UseAction(FFXIVClientStructs.FFXIV.Client.Game.ActionType.GeneralAction, 2 /* Jump */);
+
+        if (_groundJumpPhase == 0)
+        {
+            _groundJumpStartPos = me.Position;
+            Navigator.Stop();
+            Jump();
+            _groundJumpPhase = 1; // wait for grounded after the first jump
+            Diag("Movement", "groundstuck", $"moved {moved:F1}y -> jump 1");
+            return true;
+        }
+        if (_groundJumpPhase == 1)
+        {
+            if (Player.IsJumping) return true;     // still airborne from jump 1
+            Jump();
+            _groundJumpPhase = 2;
+            _groundJumpWaitUntilMs = now + GroundStuckWindowMs; // wait the same window after jump 2
+            Diag("Movement", "groundstuck", "grounded -> jump 2, waiting window");
+            return true;
+        }
+        // phase 2: waiting the window after the second jump.
+        if (Player.IsJumping || now < _groundJumpWaitUntilMs) return true;
+        _groundJumpPhase = 0;
+        if (Vector3.Distance(me.Position, _groundJumpStartPos) >= GroundStuckMinMove)
+        {
+            // The jumps freed us. Resume normal navigation, restart the sampler.
+            _groundStuckLastMs = 0;
+            Diag("Movement", "groundstuck", "jumps cleared the block -> resuming nav");
+            return true;
+        }
+
+        // Still wedged after the jumps -> back straight out ~5y (FFXIV yaw: forward = (sin,0,cos)).
         var rot = me.Rotation;
         var behind = new Vector3(-MathF.Sin(rot), 0f, -MathF.Cos(rot)) * 5f;
         _groundNudgeTarget = me.Position + behind;
         _groundNudgeUntilMs = now + 2000;
         Navigator.Stop();
         Autofate.IPC.NavmeshIPC.MoveTo(new List<Vector3> { _groundNudgeTarget.Value }, false);
-        Diag("Movement", "groundstuck", $"moved {moved:F1}y in {GroundStuckWindowMs}ms -> backing out 5y then repath");
+        Diag("Movement", "groundstuck", "jumps failed -> backing out 5y then repath");
         return true;
     }
 
