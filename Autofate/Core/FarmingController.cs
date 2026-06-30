@@ -93,6 +93,14 @@ public sealed unsafe class FarmingController
     private const long FateStuckWindowMs = 2000;
     private const float FateStuckMinMove = 2f;
 
+    // In-fate UNLANDABLE recovery: rarely we land on a spot that isn't actually landable, so the
+    // dismount keeps failing and we sit MOUNTED + stationary inside the ring. If that persists past
+    // FateStuckWindowMs, re-roll a NEW random LANDABLE point in the ring and navigate to it. Once
+    // we're DISMOUNTED we've made it (no re-roll). Dedicated sampler so it can't clash with the
+    // TravelingToFate stuck sampler.
+    private System.Numerics.Vector3 _inFateMountPos;
+    private long _inFateMountMs;
+
     // Grounded-stuck escape: while on foot and navigating, if we move < GroundStuckMinMove over
     // GroundStuckWindowMs we're wedged on geometry. Back straight out ~5y, then regenerate the path.
     private System.Numerics.Vector3 _groundStuckLastPos;
@@ -896,11 +904,36 @@ public sealed unsafe class FarmingController
                      || ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>("SelectYesno", out var yd) && ECommons.GenericHelpers.IsAddonReady(yd);
             if (!dlgUp)
             {
+                var meM = Player.Object;
+                var nowM = Environment.TickCount64;
+
+                // Track how long we've been mounted + stationary here. If we landed on a spot we
+                // can't actually dismount on, re-roll a new LANDABLE point and navigate to it.
+                if (_inFateMountMs == 0) { _inFateMountMs = nowM; _inFateMountPos = meM?.Position ?? default; }
+                else if (meM != null && Vector3.Distance(meM.Position, _inFateMountPos) >= FateStuckMinMove)
+                {
+                    _inFateMountMs = nowM; _inFateMountPos = meM.Position; // moving (descending/repositioning) -> keep waiting
+                }
+                else if (nowM - _inFateMountMs >= FateStuckWindowMs)
+                {
+                    _fateDropoff = RandomPointInFate(fate);
+                    _inFateMountMs = nowM; _inFateMountPos = meM?.Position ?? default;
+                    Navigator.Stop();
+                    Navigator.MoveTo(C, _fateDropoff.Value, 4f, allowMount: false);
+                    Diag("Movement", "infateunlandable", $"mounted+stationary in fate >{FateStuckWindowMs}ms -> new landable point {_fateDropoff}");
+                    return;
+                }
+
                 Navigator.Stop();
                 Features.MountManager.Dismount();
                 StatusText = $"Landing/dismounting before engaging: {fate.Name}";
                 return;
             }
+            _inFateMountMs = 0; // dialogue up -> not the stuck case
+        }
+        else
+        {
+            _inFateMountMs = 0; // DISMOUNTED in the fate => we made it. Clear the recovery sampler.
         }
 
         var type = FateSelector.Classify(fate);
@@ -1601,6 +1634,7 @@ public sealed unsafe class FarmingController
         _groundStuckLastMs = 0;
         _groundJumpPhase = 0;
         _groundNudgeTarget = null;
+        _inFateMountMs = 0;
     }
 
     private void OnFateFinished()
