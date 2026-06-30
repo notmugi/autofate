@@ -104,6 +104,7 @@ public sealed unsafe class FarmingController
     private long _groundJumpWaitUntilMs;
     private System.Numerics.Vector3? _groundNudgeTarget; // back-out point we're driving to
     private long _groundNudgeUntilMs;                    // safety timeout for the nudge
+    private bool _groundNudgeFly;                        // back-out nudge should use flight pathing
     private const long GroundStuckWindowMs = 2000;
     private const float GroundStuckMinMove = 2f;
     private void SetCombatBackend(bool active)
@@ -1687,17 +1688,42 @@ public sealed unsafe class FarmingController
                 _groundJumpPhase = 0;
                 return true;
             }
-            Autofate.IPC.NavmeshIPC.MoveTo(new List<Vector3> { back }, false);
+            Autofate.IPC.NavmeshIPC.MoveTo(new List<Vector3> { back }, _groundNudgeFly);
             StatusText = "Unblocking (backing out)";
             return true;
         }
 
-        // Only watch when we're actually walking on foot.
-        if (!Navigator.IsNavigating || Features.MountManager.IsMounted
-            || Features.MountManager.IsFlying || Player.IsJumping)
+        // Watch while navigating on foot OR flying (mounted-ground doesn't get wedged the same way).
+        var flying = Features.MountManager.IsFlying;
+        if (!Navigator.IsNavigating || Player.IsJumping
+            || (Features.MountManager.IsMounted && !flying))
         {
             _groundStuckLastMs = 0;
             return false;
+        }
+
+        // FLYING + STUCK: vnav can think we can move forward into a wall (e.g. inside a cave) and
+        // keeps regenerating the path into it. Skip the jump phase (useless airborne) and go STRAIGHT
+        // to the back-out + renav: reverse ~5y along our facing (in 3D, fly) then regenerate.
+        if (flying)
+        {
+            var now2 = Environment.TickCount64;
+            if (_groundStuckLastMs == 0) { _groundStuckLastMs = now2; _groundStuckLastPos = me.Position; return false; }
+            if (now2 - _groundStuckLastMs < GroundStuckWindowMs) return false;
+            var moved2 = Vector3.Distance(me.Position, _groundStuckLastPos);
+            _groundStuckLastMs = now2;
+            _groundStuckLastPos = me.Position;
+            if (moved2 >= GroundStuckMinMove) return false; // moving fine
+
+            var rotF = me.Rotation;
+            var behindF = new Vector3(-MathF.Sin(rotF), 0f, -MathF.Cos(rotF)) * 5f;
+            _groundNudgeTarget = me.Position + behindF;
+            _groundNudgeFly = true;
+            _groundNudgeUntilMs = now2 + 2000;
+            Navigator.Stop();
+            Autofate.IPC.NavmeshIPC.MoveTo(new List<Vector3> { _groundNudgeTarget.Value }, true);
+            Diag("Movement", "flystuck", $"flying & moved {moved2:F1}y -> backing out 5y then repath");
+            return true;
         }
 
         var now = Environment.TickCount64;
@@ -1748,6 +1774,7 @@ public sealed unsafe class FarmingController
         var rot = me.Rotation;
         var behind = new Vector3(-MathF.Sin(rot), 0f, -MathF.Cos(rot)) * 5f;
         _groundNudgeTarget = me.Position + behind;
+        _groundNudgeFly = false;
         _groundNudgeUntilMs = now + 2000;
         Navigator.Stop();
         Autofate.IPC.NavmeshIPC.MoveTo(new List<Vector3> { _groundNudgeTarget.Value }, false);
